@@ -25,6 +25,7 @@ type CustomSample = {
   sampleIndex: number
   originalName: string
   fileName: string
+  mimeType: string
   data: ArrayBuffer
 }
 
@@ -108,10 +109,48 @@ type ExportSample = {
   data?: ArrayBuffer
 }
 
+type HitsoundLayer = {
+  normal?: ExportSample
+  addition?: ExportSample
+  hitSoundBits: number
+}
+
 type SourceHitsoundAssignment = {
-  head?: ExportSample
-  sliderBody?: ExportSample
-  sliderEnd?: ExportSample
+  head?: HitsoundLayer
+  sliderBody?: HitsoundLayer
+  sliderEnd?: HitsoundLayer
+}
+
+type SavedCustomSample = Omit<CustomSample, "data"> & {
+  dataUrl: string
+}
+
+type SavedTrack = {
+  name: string
+  sampleName: string
+  sampleSource: SampleSource
+  customSampleBank: SampleBank
+  customSampleSound: SampleSound
+  customSampleIndex: number
+  customSample: SavedCustomSample | null
+  hits: boolean[]
+}
+
+type SavedProject = {
+  version: 1
+  osuFileName: string
+  osuText: string
+  backingAudioName: string
+  backingAudioDataUrl: string | null
+  fallbackCustomSample: SavedCustomSample | null
+  tracks: SavedTrack[]
+  activeTrackIndex: number
+  currentTimeMs: number
+  playbackAnchorMs: number
+  audioOffsetMs: number
+  snapPlaybackToGrid: boolean
+  followPlayhead: boolean
+  pixelsPerSecond: number
 }
 
 const laneLabelWidth = 190
@@ -208,6 +247,7 @@ const snapPlaybackToGrid = ref(true)
 const followPlayhead = ref(true)
 const backingAudioUrl = ref<string | null>(null)
 const backingAudioName = ref("")
+const backingAudioDataUrl = ref<string | null>(null)
 const backingDurationMs = ref(0)
 const backingAudio = ref<HTMLAudioElement | null>(null)
 const timelineScroll = ref<HTMLDivElement | null>(null)
@@ -772,6 +812,199 @@ function revokeCustomSample(track: Track) {
   }
 }
 
+function fileToDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+
+    reader.addEventListener("load", () => resolve(String(reader.result ?? "")))
+    reader.addEventListener("error", () => reject(reader.error))
+    reader.readAsDataURL(file)
+  })
+}
+
+function arrayBufferToDataUrl(data: ArrayBuffer, mimeType: string) {
+  const bytes = new Uint8Array(data)
+  let binary = ""
+
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte)
+  }
+
+  return `data:${mimeType};base64,${window.btoa(binary)}`
+}
+
+function dataUrlToBlob(dataUrl: string) {
+  const [header = "", base64 = ""] = dataUrl.split(",")
+  const mimeType = header.match(/^data:([^;]+);base64$/)?.[1] || "application/octet-stream"
+  const binary = window.atob(base64)
+  const bytes = new Uint8Array(binary.length)
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+
+  return new Blob([bytes], { type: mimeType })
+}
+
+async function dataUrlToArrayBuffer(dataUrl: string) {
+  return dataUrlToBlob(dataUrl).arrayBuffer()
+}
+
+function serializeCustomSample(sample: CustomSample | null): SavedCustomSample | null {
+  if (!sample) {
+    return null
+  }
+
+  return {
+    bank: sample.bank,
+    sound: sample.sound,
+    sampleIndex: sample.sampleIndex,
+    originalName: sample.originalName,
+    fileName: sample.fileName,
+    mimeType: sample.mimeType,
+    dataUrl: arrayBufferToDataUrl(sample.data, sample.mimeType),
+  }
+}
+
+async function deserializeCustomSample(sample: SavedCustomSample | null): Promise<CustomSample | null> {
+  if (!sample) {
+    return null
+  }
+
+  return {
+    bank: sample.bank,
+    sound: sample.sound,
+    sampleIndex: sample.sampleIndex,
+    originalName: sample.originalName,
+    fileName: sample.fileName,
+    mimeType: sample.mimeType,
+    data: await dataUrlToArrayBuffer(sample.dataUrl),
+  }
+}
+
+function revokeSessionObjectUrls() {
+  for (const track of tracks.value) {
+    revokeCustomSample(track)
+  }
+
+  if (backingAudioUrl.value) {
+    URL.revokeObjectURL(backingAudioUrl.value)
+  }
+}
+
+function saveProject() {
+  if (!originalOsuText.value) {
+    return
+  }
+
+  const project: SavedProject = {
+    version: 1,
+    osuFileName: originalOsuFileName.value,
+    osuText: originalOsuText.value,
+    backingAudioName: backingAudioName.value,
+    backingAudioDataUrl: backingAudioDataUrl.value,
+    fallbackCustomSample: serializeCustomSample(fallbackCustomSample.value),
+    tracks: tracks.value.map((track) => ({
+      name: track.name,
+      sampleName: track.sampleName,
+      sampleSource: track.sampleSource,
+      customSampleBank: track.customSampleBank,
+      customSampleSound: track.customSampleSound,
+      customSampleIndex: track.customSampleIndex,
+      customSample: serializeCustomSample(track.customSample),
+      hits: [...track.hits],
+    })),
+    activeTrackIndex: activeTrackIndex.value,
+    currentTimeMs: currentTimeMs.value,
+    playbackAnchorMs: playbackAnchorMs.value,
+    audioOffsetMs: audioOffsetMs.value,
+    snapPlaybackToGrid: snapPlaybackToGrid.value,
+    followPlayhead: followPlayhead.value,
+    pixelsPerSecond: pixelsPerSecond.value,
+  }
+  const baseName = originalOsuFileName.value.replace(/\.osu$/i, "") || "hser-project"
+  const blob = new Blob([JSON.stringify(project)], { type: "application/json;charset=utf-8" })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement("a")
+
+  link.href = url
+  link.download = `${baseName}.hser.json`
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+async function handleProjectLoad(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+
+  if (!file) {
+    return
+  }
+
+  stopPlayback()
+
+  const project = JSON.parse(await file.text()) as SavedProject
+  const parsed = parseOsuFile(project.osuText)
+
+  revokeSessionObjectUrls()
+  originalOsuText.value = project.osuText
+  originalOsuFileName.value = project.osuFileName || "loaded.osu"
+  hitObjectLineIndices.value = parsed.hitObjectLineIndices
+  mapInfo.value = parsed.info
+  notes.value = parsed.notes
+  timingPoints.value = parsed.timingPoints
+  fallbackCustomSample.value = await deserializeCustomSample(project.fallbackCustomSample)
+
+  const restoredTracks: Track[] = []
+
+  for (const savedTrack of project.tracks) {
+    trackIdSeed += 1
+
+    const customSample = await deserializeCustomSample(savedTrack.customSample)
+    const defaultSample = defaultSamples.find((sample) => sample.name === savedTrack.sampleName)
+    const sampleUrl =
+      savedTrack.sampleSource === "custom" && customSample
+        ? URL.createObjectURL(new Blob([customSample.data], { type: customSample.mimeType }))
+        : defaultSample?.url ?? null
+
+    restoredTracks.push({
+      id: trackIdSeed,
+      name: savedTrack.name,
+      sampleName: savedTrack.sampleName,
+      sampleUrl,
+      sampleSource: savedTrack.sampleSource,
+      customSampleBank: savedTrack.customSampleBank,
+      customSampleSound: savedTrack.customSampleSound,
+      customSampleIndex: savedTrack.customSampleIndex,
+      customSample,
+      hits: Array.from({ length: parsed.notes.length }, (_, index) => Boolean(savedTrack.hits[index])),
+    })
+  }
+
+  tracks.value = restoredTracks.length ? restoredTracks : [createTrack("Track 1", parsed.notes.length)]
+  backingAudioName.value = project.backingAudioName
+  backingAudioDataUrl.value = project.backingAudioDataUrl
+  backingDurationMs.value = 0
+  backingAudioUrl.value = project.backingAudioDataUrl
+    ? URL.createObjectURL(dataUrlToBlob(project.backingAudioDataUrl))
+    : null
+  currentTimeMs.value = Math.min(Math.max(playbackStartMs.value, project.currentTimeMs), durationMs.value)
+  playbackAnchorMs.value = Math.min(Math.max(playbackStartMs.value, project.playbackAnchorMs), durationMs.value)
+  activeTrackIndex.value = Math.min(project.activeTrackIndex, Math.max(0, tracks.value.length - 1))
+  audioOffsetMs.value = project.audioOffsetMs
+  snapPlaybackToGrid.value = project.snapPlaybackToGrid
+  followPlayhead.value = project.followPlayhead
+  pixelsPerSecond.value = clampZoom(project.pixelsPerSecond)
+  copiedPattern.value = null
+  clearSelection()
+  input.value = ""
+
+  await nextTick()
+  timelineScroll.value?.scrollTo({ left: 0, top: 0 })
+  updateTimelineViewport()
+  centerPlayheadInTimeline()
+}
+
 function selectDefaultSample(trackIndex: number, sampleUrl: string) {
   const track = tracks.value[trackIndex]
   const sample = defaultSamples.find((defaultSample) => defaultSample.url === sampleUrl)
@@ -855,6 +1088,7 @@ async function handleFallbackSampleUpload(event: Event) {
     sampleIndex: 1,
     originalName: file.name,
     fileName: "soft-hitnormal.wav",
+    mimeType: file.type || "audio/wav",
     data: await file.arrayBuffer(),
   }
   input.value = ""
@@ -914,12 +1148,13 @@ async function handleSampleUpload(event: Event, trackIndex: number) {
     sampleIndex,
     originalName: file.name,
     fileName,
+    mimeType: file.type || "audio/wav",
     data,
   }
   input.value = ""
 }
 
-function handleBackingUpload(event: Event) {
+async function handleBackingUpload(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
 
@@ -935,6 +1170,7 @@ function handleBackingUpload(event: Event) {
 
   backingAudioUrl.value = URL.createObjectURL(file)
   backingAudioName.value = file.name
+  backingAudioDataUrl.value = await fileToDataUrl(file)
   backingDurationMs.value = 0
   input.value = ""
 }
@@ -1020,11 +1256,26 @@ function getExportSampleForTrack(track: Track, trackIndex: number): ExportSample
   }
 }
 
-function getSelectedExportSample(noteIndex: number) {
-  let selectedSample: ExportSample | null = null
+function mergeSampleIntoLayer(layer: HitsoundLayer, sample: ExportSample) {
+  if (sample.sound === "hitnormal") {
+    layer.normal = sample
+    return
+  }
+
+  layer.hitSoundBits |= getHitSoundBit(sample.sound)
+  layer.addition = sample
+}
+
+function getSelectedHitsoundLayer(noteIndex: number, fallbackNormal: ExportSample) {
+  const layer: HitsoundLayer = {
+    hitSoundBits: 0,
+  }
+  let hasSelectedSample = false
 
   // TODO: Resolve true hitsound conflicts explicitly in the UI. For now, the
-  // highest-numbered track wins when multiple tracks hit the same osu slot.
+  // highest-numbered track wins within each osu field. This means hitnormal
+  // picks the highest normal layer, and additions share the highest addition
+  // set/index while OR-ing together their clap/finish/whistle bits.
   tracks.value.forEach((track, trackIndex) => {
     if (!track.hits[noteIndex]) {
       return
@@ -1033,11 +1284,16 @@ function getSelectedExportSample(noteIndex: number) {
     const exportSample = getExportSampleForTrack(track, trackIndex)
 
     if (exportSample) {
-      selectedSample = exportSample
+      hasSelectedSample = true
+      mergeSampleIntoLayer(layer, exportSample)
     }
   })
 
-  return selectedSample
+  if (!layer.normal) {
+    layer.normal = fallbackNormal
+  }
+
+  return hasSelectedSample ? layer : null
 }
 
 function buildSourceHitsoundAssignments() {
@@ -1056,20 +1312,20 @@ function buildSourceHitsoundAssignments() {
 
     sourceSlots.set(note.sourceIndex, slots)
 
-    const exportSample = getSelectedExportSample(note.index)
+    const hitsoundLayer = getSelectedHitsoundLayer(note.index, fallbackSample)
 
-    if (!exportSample) {
+    if (!hitsoundLayer) {
       continue
     }
 
     const assignment = assignments.get(note.sourceIndex) ?? {}
 
     if (note.kind === "slider-end") {
-      assignment.sliderEnd = exportSample
+      assignment.sliderEnd = hitsoundLayer
     } else if (note.kind === "slider-body") {
-      assignment.sliderBody = exportSample
+      assignment.sliderBody = hitsoundLayer
     } else {
-      assignment.head = exportSample
+      assignment.head = hitsoundLayer
     }
 
     assignments.set(note.sourceIndex, assignment)
@@ -1079,11 +1335,17 @@ function buildSourceHitsoundAssignments() {
     const assignment = assignments.get(sourceIndex) ?? {}
 
     if (slots.hasHead && !assignment.head) {
-      assignment.head = fallbackSample
+      assignment.head = {
+        normal: fallbackSample,
+        hitSoundBits: 0,
+      }
     }
 
     if (slots.hasSliderEnd && !assignment.sliderEnd) {
-      assignment.sliderEnd = fallbackSample
+      assignment.sliderEnd = {
+        normal: fallbackSample,
+        hitSoundBits: 0,
+      }
     }
 
     assignments.set(sourceIndex, assignment)
@@ -1092,8 +1354,8 @@ function buildSourceHitsoundAssignments() {
   return assignments
 }
 
-function getHitSoundBit(sound: ExportSample["sound"]) {
-  const bits: Record<ExportSample["sound"], number> = {
+function getHitSoundBit(sound: SampleSound) {
+  const bits: Record<SampleSound, number> = {
     hitnormal: 0,
     hitwhistle: 2,
     hitfinish: 4,
@@ -1104,8 +1366,8 @@ function getHitSoundBit(sound: ExportSample["sound"]) {
   return bits[sound]
 }
 
-function getSampleSetId(bank: ExportSample["bank"]) {
-  const ids: Record<ExportSample["bank"], number> = {
+function getSampleSetId(bank: SampleBank) {
+  const ids: Record<SampleBank, number> = {
     normal: 1,
     soft: 2,
     drum: 3,
@@ -1153,6 +1415,42 @@ function applySampleToHitSample(rawHitSample: string | undefined, sample: Export
   return formatHitSample(hitSample)
 }
 
+function chooseLayerSampleIndex(layer: HitsoundLayer) {
+  const normal = layer.normal
+  const addition = layer.addition
+
+  if (!normal) {
+    return addition?.sampleIndex ?? 0
+  }
+
+  if (!addition) {
+    return normal.sampleIndex
+  }
+
+  // TODO: osu has only one custom sample index per hitSample. If normal and
+  // addition layers use different custom indices, choose the higher track for
+  // now and surface this as an export conflict later.
+  return addition.trackIndex > normal.trackIndex ? addition.sampleIndex : normal.sampleIndex
+}
+
+function applyLayerToHitSample(rawHitSample: string | undefined, layer: HitsoundLayer) {
+  const hitSample = parseHitSample(rawHitSample)
+
+  hitSample.filename = ""
+
+  if (layer.normal) {
+    hitSample.normalSet = getSampleSetId(layer.normal.bank)
+  }
+
+  if (layer.addition) {
+    hitSample.additionSet = getSampleSetId(layer.addition.bank)
+  }
+
+  hitSample.index = chooseLayerSampleIndex(layer)
+
+  return formatHitSample(hitSample)
+}
+
 function getHitSamplePartIndex(kind: HitObjectKind) {
   if (kind === "slider") {
     return 10
@@ -1169,19 +1467,19 @@ function getHitSamplePartIndex(kind: HitObjectKind) {
   return -1
 }
 
-function applyHeadHitsound(parts: string[], kind: HitObjectKind, sample: ExportSample) {
-  parts[4] = String(getHitSoundBit(sample.sound))
+function applyHeadHitsound(parts: string[], kind: HitObjectKind, layer: HitsoundLayer) {
+  parts[4] = String(layer.hitSoundBits)
 
   const hitSamplePartIndex = getHitSamplePartIndex(kind)
 
   if (hitSamplePartIndex >= 0) {
-    parts[hitSamplePartIndex] = applySampleToHitSample(parts[hitSamplePartIndex], sample)
+    parts[hitSamplePartIndex] = applyLayerToHitSample(parts[hitSamplePartIndex], layer)
     return
   }
 
   if (kind === "hold" && parts[5]) {
     const [endTime, ...rawHitSampleParts] = parts[5].split(":")
-    const hitSample = applySampleToHitSample(rawHitSampleParts.join(":"), sample)
+    const hitSample = applyLayerToHitSample(rawHitSampleParts.join(":"), layer)
 
     parts[5] = `${endTime}:${hitSample}`
   }
@@ -1211,30 +1509,31 @@ function normalizeSliderEdgeParts(parts: string[]) {
   return { edgeSounds, edgeSets }
 }
 
-function formatEdgeSet(sample: ExportSample) {
-  const sampleSetId = getSampleSetId(sample.bank)
+function formatEdgeSet(layer: HitsoundLayer) {
+  const normalSet = layer.normal ? getSampleSetId(layer.normal.bank) : 0
+  const additionSet = layer.addition ? getSampleSetId(layer.addition.bank) : 0
 
-  return sample.sound === "hitnormal" ? `${sampleSetId}:0` : `0:${sampleSetId}`
+  return `${normalSet}:${additionSet}`
 }
 
 function applySliderEdgeHitsound(
   parts: string[],
-  sample: ExportSample,
+  layer: HitsoundLayer,
   edge: "head" | "end",
 ) {
   const { edgeSounds, edgeSets } = normalizeSliderEdgeParts(parts)
   const edgeIndex = edge === "head" ? 0 : edgeSounds.length - 1
 
-  edgeSounds[edgeIndex] = String(getHitSoundBit(sample.sound))
-  edgeSets[edgeIndex] = formatEdgeSet(sample)
+  edgeSounds[edgeIndex] = String(layer.hitSoundBits)
+  edgeSets[edgeIndex] = formatEdgeSet(layer)
   parts[8] = edgeSounds.join("|")
   parts[9] = edgeSets.join("|")
-  parts[10] = applySampleToHitSample(parts[10], sample)
+  parts[10] = applyLayerToHitSample(parts[10], layer)
 }
 
-function chooseHigherTrackSample(
-  left: ExportSample | undefined,
-  right: ExportSample | undefined,
+function mergeHitsoundLayers(
+  left: HitsoundLayer | undefined,
+  right: HitsoundLayer | undefined,
 ) {
   if (!left) {
     return right
@@ -1244,7 +1543,17 @@ function chooseHigherTrackSample(
     return left
   }
 
-  return right.trackIndex > left.trackIndex ? right : left
+  return {
+    normal:
+      right.normal && (!left.normal || right.normal.trackIndex > left.normal.trackIndex)
+        ? right.normal
+        : left.normal,
+    addition:
+      right.addition && (!left.addition || right.addition.trackIndex > left.addition.trackIndex)
+        ? right.addition
+        : left.addition,
+    hitSoundBits: left.hitSoundBits | right.hitSoundBits,
+  }
 }
 
 function rewriteHitObjectLine(line: string, assignment: SourceHitsoundAssignment) {
@@ -1252,14 +1561,16 @@ function rewriteHitObjectLine(line: string, assignment: SourceHitsoundAssignment
   const kind = getObjectKind(Number(parts[3]))
 
   if (kind === "slider") {
-    const sliderHeadSample = chooseHigherTrackSample(
+    const sliderBodyWhistle =
+      assignment.sliderBody?.addition?.sound === "sliderwhistle" ? assignment.sliderBody : undefined
+    const sliderHeadLayer = mergeHitsoundLayers(
       assignment.head,
-      assignment.sliderBody?.sound === "sliderwhistle" ? assignment.sliderBody : undefined,
+      sliderBodyWhistle,
     )
 
-    if (sliderHeadSample) {
-      applyHeadHitsound(parts, kind, sliderHeadSample)
-      applySliderEdgeHitsound(parts, sliderHeadSample, "head")
+    if (sliderHeadLayer) {
+      applyHeadHitsound(parts, kind, sliderHeadLayer)
+      applySliderEdgeHitsound(parts, sliderHeadLayer, "head")
     }
 
     if (assignment.sliderEnd) {
@@ -2208,6 +2519,20 @@ onBeforeUnmount(() => {
           <span>Fallback soft-hitnormal</span>
           <input accept="audio/*" type="file" @change="handleFallbackSampleUpload" />
         </label>
+
+        <label class="compact-upload">
+          <span>Load project</span>
+          <input accept=".json,application/json" type="file" @change="handleProjectLoad" />
+        </label>
+
+        <button
+          class="ghost-button export-button"
+          type="button"
+          :disabled="!originalOsuText"
+          @click="saveProject"
+        >
+          Save project
+        </button>
 
         <button
           class="ghost-button export-button"
