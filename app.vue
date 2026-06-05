@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref } from "vue"
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue"
 
 type ToneNamespace = typeof import("tone")
 
@@ -146,6 +146,7 @@ const mapInfo = ref<MapInfo | null>(null)
 const timingPoints = ref<TimingPoint[]>([])
 const tracks = ref<Track[]>([])
 const currentTimeMs = ref(0)
+const playbackAnchorMs = ref(0)
 const isPlaying = ref(false)
 const audioOffsetMs = ref(0)
 const snapPlaybackToGrid = ref(true)
@@ -165,6 +166,7 @@ const isSelectingRange = ref(false)
 const copiedPattern = ref<CopiedPattern | null>(null)
 const clipboardStatus = ref("")
 const suppressNextTimelineClick = ref(false)
+const isTrackDrawerOpen = ref(true)
 
 let trackIdSeed = 0
 let tone: ToneNamespace | null = null
@@ -402,6 +404,7 @@ async function handleOsuUpload(event: Event) {
     hits: Array(parsed.notes.length).fill(false),
   }))
   currentTimeMs.value = playbackStartMs.value
+  playbackAnchorMs.value = playbackStartMs.value
   input.value = ""
   timelineScroll.value?.scrollTo({ left: 0 })
   await nextTick()
@@ -764,12 +767,13 @@ function handleBackingMetadata() {
   }
 
   if (backingAudio.value) {
-    backingAudio.value.currentTime = playbackStartMs.value / 1_000
+    backingAudio.value.currentTime = playbackAnchorMs.value / 1_000
   }
 }
 
 function addTrack() {
   tracks.value.push(createTrack(`Track ${tracks.value.length + 1}`, notes.value.length))
+  activeTrackIndex.value = tracks.value.length - 1
 }
 
 function removeTrack(trackIndex: number) {
@@ -783,6 +787,16 @@ function removeTrack(trackIndex: number) {
 
   players.get(track.id)?.dispose()
   players.delete(track.id)
+
+  activeTrackIndex.value = Math.min(activeTrackIndex.value, Math.max(0, tracks.value.length - 1))
+
+  if (selectionTrackIndex.value === trackIndex) {
+    selectionTrackIndex.value = null
+    selectionAnchorMs.value = null
+    selectionFocusMs.value = null
+  } else if (selectionTrackIndex.value !== null && selectionTrackIndex.value > trackIndex) {
+    selectionTrackIndex.value -= 1
+  }
 }
 
 function clearTrack(trackIndex: number) {
@@ -894,6 +908,16 @@ function finishRangeSelection() {
   }
 
   isSelectingRange.value = false
+
+  if (selectionDurationMs.value <= 0) {
+    selectionTrackIndex.value = null
+    selectionAnchorMs.value = null
+    selectionFocusMs.value = null
+    suppressNextTimelineClick.value = false
+    clipboardStatus.value = ""
+    return
+  }
+
   clipboardStatus.value = hasSelection.value
     ? `Selected ${formatTime(selectionStartMs.value)}-${formatTime(selectionEndMs.value)} on ${
         tracks.value[selectionTrackIndex.value ?? 0]?.name ?? "track"
@@ -969,6 +993,80 @@ function pasteSelection() {
   clipboardStatus.value = `Pasted ${pastedCount} hits to ${targetTrack.name} at ${formatTime(pasteStartMs)}.`
 }
 
+function clearSelectedRegion() {
+  if (!hasSelection.value || selectionTrackIndex.value === null) {
+    clipboardStatus.value = "Drag across a track lane to select a region first."
+    return
+  }
+
+  const track = tracks.value[selectionTrackIndex.value]
+
+  if (!track) {
+    return
+  }
+
+  let clearedCount = 0
+
+  for (const note of notes.value) {
+    const timeMs = noteDisplayTime(note)
+
+    if (timeMs < selectionStartMs.value || timeMs > selectionEndMs.value || !track.hits[note.index]) {
+      continue
+    }
+
+    track.hits[note.index] = false
+    clearedCount += 1
+  }
+
+  clipboardStatus.value = `Cleared ${clearedCount} hits from ${track.name}.`
+}
+
+function isTypingTarget(target: EventTarget | null) {
+  const element = target as HTMLElement | null
+
+  return Boolean(
+    element?.closest("input, textarea, select") ||
+      element?.isContentEditable,
+  )
+}
+
+function handleGlobalKeydown(event: KeyboardEvent) {
+  if (isTypingTarget(event.target)) {
+    return
+  }
+
+  const key = event.key.toLowerCase()
+
+  if ((event.ctrlKey || event.metaKey) && key === "c") {
+    event.preventDefault()
+    copySelection()
+    return
+  }
+
+  if ((event.ctrlKey || event.metaKey) && key === "v") {
+    event.preventDefault()
+    pasteSelection()
+    return
+  }
+
+  if (event.key === "Delete") {
+    event.preventDefault()
+    clearSelectedRegion()
+    return
+  }
+
+  if (event.code === "Space") {
+    event.preventDefault()
+    void togglePlayback()
+    return
+  }
+
+  if (!event.ctrlKey && !event.metaKey && !event.altKey && key === "z") {
+    event.preventDefault()
+    void resetPlaybackAnchorToBeginning()
+  }
+}
+
 async function togglePlayback() {
   if (isPlaying.value) {
     stopPlayback()
@@ -979,7 +1077,7 @@ async function togglePlayback() {
 }
 
 async function startPlayback() {
-  await startPlaybackFrom(playbackStartMs.value)
+  await startPlaybackFrom(playbackAnchorMs.value)
 }
 
 async function startPlaybackFrom(startTimeMs: number) {
@@ -1069,12 +1167,12 @@ function stopPlayback(resetPlayhead = true) {
     backingAudio.value.pause()
 
     if (resetPlayhead) {
-      backingAudio.value.currentTime = playbackStartMs.value / 1_000
+      backingAudio.value.currentTime = playbackAnchorMs.value / 1_000
     }
   }
 
   if (resetPlayhead) {
-    currentTimeMs.value = playbackStartMs.value
+    currentTimeMs.value = playbackAnchorMs.value
   }
 
   isPlaying.value = false
@@ -1254,6 +1352,7 @@ async function seekToTime(timeMs: number) {
   const clampedTimeMs = Math.min(Math.max(playbackStartMs.value, timeMs), durationMs.value)
   const wasPlaying = isPlaying.value
 
+  playbackAnchorMs.value = clampedTimeMs
   stopPlayback(false)
   currentTimeMs.value = clampedTimeMs
 
@@ -1269,6 +1368,29 @@ async function seekToTime(timeMs: number) {
 
   if (wasPlaying) {
     await startPlaybackFrom(clampedTimeMs)
+  }
+}
+
+async function resetPlaybackAnchorToBeginning() {
+  const startMs = playbackStartMs.value
+  const wasPlaying = isPlaying.value
+
+  playbackAnchorMs.value = startMs
+  stopPlayback(false)
+  currentTimeMs.value = startMs
+
+  if (tone) {
+    tone.Transport.position = startMs / 1_000
+  }
+
+  if (backingAudio.value) {
+    backingAudio.value.currentTime = startMs / 1_000
+  }
+
+  centerPlayheadInTimeline()
+
+  if (wasPlaying) {
+    await startPlaybackFrom(startMs)
   }
 }
 
@@ -1349,7 +1471,12 @@ function formatNumber(value: number) {
   return Number.isInteger(value) ? String(value) : value.toFixed(2)
 }
 
+onMounted(() => {
+  window.addEventListener("keydown", handleGlobalKeydown)
+})
+
 onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleGlobalKeydown)
   stopPlayback()
 
   for (const player of players.values()) {
@@ -1423,6 +1550,11 @@ onBeforeUnmount(() => {
         <div class="stat">
           <span>Playhead</span>
           <strong>{{ formatTime(currentTimeMs) }}</strong>
+        </div>
+
+        <div class="stat">
+          <span>Start point</span>
+          <strong>{{ formatTime(playbackAnchorMs) }}</strong>
         </div>
 
         <div class="stat">
@@ -1557,16 +1689,26 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <section v-if="notes.length" class="panel track-panel">
-      <div class="section-heading">
+    <section
+      v-if="notes.length"
+      class="panel track-panel"
+      :class="{ collapsed: !isTrackDrawerOpen }"
+    >
+      <div class="section-heading track-drawer-heading">
         <div>
           <p class="eyebrow">Tracks</p>
           <h2>Assign samples</h2>
         </div>
-        <button class="ghost-button" type="button" @click="addTrack">Add track</button>
+        <div class="track-drawer-actions">
+          <span>{{ tracks.length }} tracks</span>
+          <button class="ghost-button" type="button" @click="addTrack">Add track</button>
+          <button class="ghost-button" type="button" @click="isTrackDrawerOpen = !isTrackDrawerOpen">
+            {{ isTrackDrawerOpen ? "Hide" : "Show" }}
+          </button>
+        </div>
       </div>
 
-      <div class="track-list">
+      <div v-show="isTrackDrawerOpen" class="track-list">
         <article
           v-for="(track, trackIndex) in tracks"
           :key="track.id"
@@ -1575,7 +1717,7 @@ onBeforeUnmount(() => {
           @click="setActiveTrack(trackIndex)"
         >
           <input v-model="track.name" class="track-name" aria-label="Track name" />
-          <p>{{ trackHitCount(track) }} notes selected</p>
+          <p>{{ trackHitCount(track) }} hits</p>
           <label>
             <span>Default sample</span>
             <select
@@ -1612,8 +1754,15 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+:global(html),
+:global(body),
+:global(#__nuxt) {
+  height: 100%;
+}
+
 :global(body) {
   margin: 0;
+  overflow: hidden;
   background: #0f172a;
 }
 
@@ -1622,8 +1771,12 @@ onBeforeUnmount(() => {
 }
 
 .app-shell {
-  min-height: 100vh;
-  padding: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100vh;
+  overflow: hidden;
+  padding: 16px;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
@@ -1635,7 +1788,7 @@ onBeforeUnmount(() => {
 }
 
 .panel {
-  margin: 0 auto 20px;
+  margin: 0 auto;
   padding: 24px;
   width: min(1360px, 100%);
   border: 1px solid rgba(148, 163, 184, 0.22);
@@ -1663,7 +1816,8 @@ onBeforeUnmount(() => {
 .upload-panel {
   align-items: flex-start;
   flex-wrap: wrap;
-  padding: 16px 18px;
+  flex: 0 0 auto;
+  padding: 12px 14px;
 }
 
 .upload-summary {
@@ -1674,7 +1828,7 @@ onBeforeUnmount(() => {
 
 .upload-summary h1 {
   max-width: 760px;
-  font-size: clamp(1.4rem, 3vw, 2rem);
+  font-size: clamp(1.1rem, 2.2vw, 1.55rem);
   line-height: 1.05;
 }
 
@@ -1764,18 +1918,24 @@ button:disabled {
 }
 
 .track-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 14px;
-  margin-top: 18px;
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 2px 8px;
+  scrollbar-width: thin;
 }
 
 .track-card {
   display: grid;
-  gap: 10px;
-  padding: 16px;
+  flex: 0 0 640px;
+  grid-template-columns: 120px 64px minmax(150px, 1fr) 130px minmax(120px, 0.8fr) auto;
+  align-items: end;
+  gap: 8px;
+  padding: 10px;
   border: 1px solid rgba(148, 163, 184, 0.18);
-  border-radius: 18px;
+  border-radius: 14px;
   background: rgba(30, 41, 59, 0.64);
   cursor: pointer;
 }
@@ -1790,13 +1950,14 @@ button:disabled {
   overflow: hidden;
   margin: 0;
   color: #cbd5e1;
+  font-size: 0.82rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .track-card label {
   display: grid;
-  gap: 6px;
+  gap: 4px;
 }
 
 .track-name,
@@ -1804,10 +1965,16 @@ button:disabled {
 .track-card select {
   width: 100%;
   border: 1px solid rgba(148, 163, 184, 0.28);
-  border-radius: 12px;
-  padding: 10px 12px;
+  border-radius: 10px;
+  padding: 7px 9px;
   color: #f8fafc;
   background: rgba(15, 23, 42, 0.85);
+}
+
+.track-card input[type="file"] {
+  max-width: 130px;
+  color: #cbd5e1;
+  font-size: 0.72rem;
 }
 
 .track-actions {
@@ -1820,7 +1987,7 @@ button:disabled {
 .clipboard-controls button {
   border: 1px solid rgba(148, 163, 184, 0.28);
   border-radius: 999px;
-  padding: 9px 13px;
+  padding: 7px 11px;
   color: #e2e8f0;
   background: rgba(15, 23, 42, 0.8);
 }
@@ -1828,18 +1995,64 @@ button:disabled {
 .daw-panel {
   display: flex;
   flex-direction: column;
-  min-height: calc(100vh - 64px);
+  flex: 1 1 auto;
+  min-height: 0;
   width: 100vw;
   max-width: none;
   margin-right: calc(50% - 50vw);
   margin-left: calc(50% - 50vw);
+  padding: 14px 16px;
   border-radius: 0;
   overflow: hidden;
 }
 
+.track-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 12px;
+  left: 16px;
+  z-index: 20;
+  width: auto;
+  max-height: 38vh;
+  padding: 10px 12px;
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.96);
+  backdrop-filter: blur(16px);
+  transition: transform 160ms ease;
+}
+
+.track-panel.collapsed {
+  transform: translateY(calc(100% - 46px));
+}
+
+.track-drawer-heading {
+  gap: 12px;
+}
+
+.track-drawer-heading .eyebrow {
+  margin-bottom: 2px;
+}
+
+.track-drawer-heading h2 {
+  font-size: 1rem;
+}
+
+.track-drawer-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.track-drawer-actions span {
+  color: #94a3b8;
+  font-size: 0.8rem;
+}
+
 .transport {
   flex-wrap: wrap;
-  margin-bottom: 18px;
+  flex: 0 0 auto;
+  margin-bottom: 12px;
 }
 
 .play-button {
