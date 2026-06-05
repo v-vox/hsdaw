@@ -12,6 +12,7 @@
   },
   "description": "",
   "dependencies": {
+    "jszip": "^3.10.1",
     "nuxt": "^4.4.7",
     "tone": "^15.1.22",
     "wavesurfer.js": "^7.12.7"

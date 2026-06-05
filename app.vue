@@ -16,6 +16,17 @@ type MapInfo = {
 type HitObjectKind = "circle" | "slider" | "spinner" | "hold"
 type HitSlotKind = HitObjectKind | "slider-body" | "slider-end"
 type SampleSource = "default" | "custom" | "none"
+type SampleBank = "normal" | "soft" | "drum"
+type SampleSound = "hitnormal" | "hitwhistle" | "hitfinish" | "hitclap" | "sliderwhistle"
+
+type CustomSample = {
+  bank: SampleBank
+  sound: SampleSound
+  sampleIndex: number
+  originalName: string
+  fileName: string
+  data: ArrayBuffer
+}
 
 type OsuNote = {
   id: string
@@ -35,6 +46,10 @@ type Track = {
   sampleName: string
   sampleUrl: string | null
   sampleSource: SampleSource
+  customSampleBank: SampleBank
+  customSampleSound: SampleSound
+  customSampleIndex: number
+  customSample: CustomSample | null
   hits: boolean[]
 }
 
@@ -83,6 +98,22 @@ type CopiedPattern = {
   }>
 }
 
+type ExportSample = {
+  sampleName: string
+  bank: SampleBank
+  sound: SampleSound
+  sampleIndex: number
+  trackIndex: number
+  fileName: string
+  data?: ArrayBuffer
+}
+
+type SourceHitsoundAssignment = {
+  head?: ExportSample
+  sliderBody?: ExportSample
+  sliderEnd?: ExportSample
+}
+
 const laneLabelWidth = 190
 const markerDiameter = 22
 const defaultSamples: DefaultSample[] = [
@@ -101,6 +132,27 @@ const defaultSamples: DefaultSample[] = [
   { name: "soft-hitfinish.wav", url: "/samples/default/soft-hitfinish.wav" },
   { name: "soft-hitwhistle.wav", url: "/samples/default/soft-hitwhistle.wav" },
   { name: "soft-sliderwhistle.wav", url: "/samples/default/soft-sliderwhistle.wav" },
+]
+const sampleTypeOptions: Array<{
+  label: string
+  bank: SampleBank
+  sound: SampleSound
+}> = [
+  { label: "normal-hitnormal", bank: "normal", sound: "hitnormal" },
+  { label: "normal-hitclap", bank: "normal", sound: "hitclap" },
+  { label: "normal-hitfinish", bank: "normal", sound: "hitfinish" },
+  { label: "normal-hitwhistle", bank: "normal", sound: "hitwhistle" },
+  { label: "normal-sliderwhistle", bank: "normal", sound: "sliderwhistle" },
+  { label: "soft-hitnormal", bank: "soft", sound: "hitnormal" },
+  { label: "soft-hitclap", bank: "soft", sound: "hitclap" },
+  { label: "soft-hitfinish", bank: "soft", sound: "hitfinish" },
+  { label: "soft-hitwhistle", bank: "soft", sound: "hitwhistle" },
+  { label: "soft-sliderwhistle", bank: "soft", sound: "sliderwhistle" },
+  { label: "drum-hitnormal", bank: "drum", sound: "hitnormal" },
+  { label: "drum-hitclap", bank: "drum", sound: "hitclap" },
+  { label: "drum-hitfinish", bank: "drum", sound: "hitfinish" },
+  { label: "drum-hitwhistle", bank: "drum", sound: "hitwhistle" },
+  { label: "drum-sliderwhistle", bank: "drum", sound: "sliderwhistle" },
 ]
 const trackPalette = [
   {
@@ -145,6 +197,9 @@ const notes = ref<OsuNote[]>([])
 const mapInfo = ref<MapInfo | null>(null)
 const timingPoints = ref<TimingPoint[]>([])
 const tracks = ref<Track[]>([])
+const originalOsuText = ref("")
+const originalOsuFileName = ref("")
+const hitObjectLineIndices = ref<number[]>([])
 const currentTimeMs = ref(0)
 const playbackAnchorMs = ref(0)
 const isPlaying = ref(false)
@@ -167,12 +222,19 @@ const copiedPattern = ref<CopiedPattern | null>(null)
 const clipboardStatus = ref("")
 const suppressNextTimelineClick = ref(false)
 const isTrackDrawerOpen = ref(true)
+const isPanningTimeline = ref(false)
+const fallbackCustomSample = ref<CustomSample | null>(null)
 
 let trackIdSeed = 0
 let tone: ToneNamespace | null = null
 let animationFrameId: number | null = null
 let backingStartTimeoutId: number | null = null
 let players = new Map<number, import("tone").Player>()
+let timelinePanPointerId: number | null = null
+let timelinePanStartX = 0
+let timelinePanStartY = 0
+let timelinePanStartScrollLeft = 0
+let timelinePanStartScrollTop = 0
 
 tracks.value = [
   createTrack("Kick", 0),
@@ -379,6 +441,10 @@ function createTrack(name: string, noteCount: number): Track {
     sampleName: defaultSample?.name ?? "No sample",
     sampleUrl: defaultSample?.url ?? null,
     sampleSource: defaultSample ? "default" : "none",
+    customSampleBank: "normal",
+    customSampleSound: "hitnormal",
+    customSampleIndex: 1,
+    customSample: null,
     hits: Array(noteCount).fill(false),
   }
 }
@@ -396,6 +462,9 @@ async function handleOsuUpload(event: Event) {
   const text = await file.text()
   const parsed = parseOsuFile(text)
 
+  originalOsuText.value = text
+  originalOsuFileName.value = file.name
+  hitObjectLineIndices.value = parsed.hitObjectLineIndices
   mapInfo.value = parsed.info
   notes.value = parsed.notes
   timingPoints.value = parsed.timingPoints
@@ -412,17 +481,19 @@ async function handleOsuUpload(event: Event) {
 }
 
 function parseOsuFile(text: string) {
+  const rawLines = text.split(/\r?\n/)
   const metadata = new Map<string, string>()
   const editorSettings = new Map<string, string>()
   const difficultySettings = new Map<string, string>()
   const hitObjects: RawHitObject[] = []
+  const parsedHitObjectLineIndices: number[] = []
   const parsedNotes: OsuNote[] = []
   const parsedTimingPoints: TimingPoint[] = []
   const rawTimingPoints: RawTimingPoint[] = []
   let section = ""
   let audioFilename = ""
 
-  for (const rawLine of text.split(/\r?\n/)) {
+  for (const [lineIndex, rawLine] of rawLines.entries()) {
     const line = rawLine.trim()
 
     if (!line || line.startsWith("//")) {
@@ -514,8 +585,11 @@ function parseOsuFile(text: string) {
       continue
     }
 
+    const sourceIndex = hitObjects.length
+
+    parsedHitObjectLineIndices[sourceIndex] = lineIndex
     hitObjects.push({
-      sourceIndex: hitObjects.length,
+      sourceIndex,
       x,
       y,
       timeMs,
@@ -558,6 +632,7 @@ function parseOsuFile(text: string) {
     },
     notes: parsedNotes,
     timingPoints: parsedTimingPoints,
+    hitObjectLineIndices: parsedHitObjectLineIndices,
   }
 }
 
@@ -711,6 +786,7 @@ function selectDefaultSample(trackIndex: number, sampleUrl: string) {
   track.sampleUrl = sample.url
   track.sampleName = sample.name
   track.sampleSource = "default"
+  track.customSample = null
 }
 
 function handleDefaultSampleChange(event: Event, trackIndex: number) {
@@ -719,7 +795,98 @@ function handleDefaultSampleChange(event: Event, trackIndex: number) {
   selectDefaultSample(trackIndex, select.value)
 }
 
-function handleSampleUpload(event: Event, trackIndex: number) {
+function handleCustomSampleTypeChange(event: Event, trackIndex: number) {
+  const track = tracks.value[trackIndex]
+  const select = event.target as HTMLSelectElement
+  const option = sampleTypeOptions.find((sampleType) => sampleType.label === select.value)
+
+  if (!track || !option) {
+    return
+  }
+
+  track.customSampleBank = option.bank
+  track.customSampleSound = option.sound
+  refreshCustomSampleNaming(track)
+}
+
+function getSampleFileName(bank: SampleBank, sound: SampleSound, sampleIndex: number) {
+  const normalizedIndex = Math.max(1, Math.round(sampleIndex) || 1)
+  const suffix = normalizedIndex <= 1 ? "" : String(normalizedIndex)
+
+  return `${bank}-${sound}${suffix}.wav`
+}
+
+function getFallbackExportSample(): ExportSample {
+  const customSample = fallbackCustomSample.value
+
+  if (customSample) {
+    return {
+      sampleName: customSample.fileName,
+      bank: customSample.bank,
+      sound: customSample.sound,
+      sampleIndex: customSample.sampleIndex,
+      trackIndex: -1,
+      fileName: customSample.fileName,
+      data: customSample.data,
+    }
+  }
+
+  return {
+    sampleName: "soft-hitnormal.wav",
+    bank: "soft",
+    sound: "hitnormal",
+    sampleIndex: 1,
+    trackIndex: -1,
+    fileName: "soft-hitnormal.wav",
+  }
+}
+
+async function handleFallbackSampleUpload(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+
+  if (!file) {
+    return
+  }
+
+  fallbackCustomSample.value = {
+    bank: "soft",
+    sound: "hitnormal",
+    sampleIndex: 1,
+    originalName: file.name,
+    fileName: "soft-hitnormal.wav",
+    data: await file.arrayBuffer(),
+  }
+  input.value = ""
+}
+
+function refreshCustomSampleNaming(track: Track) {
+  if (!track.customSample) {
+    return
+  }
+
+  const sampleIndex = Math.max(1, Math.round(track.customSampleIndex) || 1)
+  const fileName = getSampleFileName(track.customSampleBank, track.customSampleSound, sampleIndex)
+
+  track.customSampleIndex = sampleIndex
+  track.customSample.bank = track.customSampleBank
+  track.customSample.sound = track.customSampleSound
+  track.customSample.sampleIndex = sampleIndex
+  track.customSample.fileName = fileName
+  track.sampleName = fileName
+}
+
+function handleCustomSampleIndexChange(trackIndex: number) {
+  const track = tracks.value[trackIndex]
+
+  if (!track) {
+    return
+  }
+
+  refreshCustomSampleNaming(track)
+}
+
+async function handleSampleUpload(event: Event, trackIndex: number) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   const track = tracks.value[trackIndex]
@@ -733,9 +900,22 @@ function handleSampleUpload(event: Event, trackIndex: number) {
   players.get(track.id)?.dispose()
   players.delete(track.id)
 
+  const data = await file.arrayBuffer()
+  const sampleIndex = Math.max(1, Math.round(track.customSampleIndex) || 1)
+  const fileName = getSampleFileName(track.customSampleBank, track.customSampleSound, sampleIndex)
+
   track.sampleUrl = URL.createObjectURL(file)
-  track.sampleName = file.name
+  track.sampleName = fileName
   track.sampleSource = "custom"
+  track.customSampleIndex = sampleIndex
+  track.customSample = {
+    bank: track.customSampleBank,
+    sound: track.customSampleSound,
+    sampleIndex,
+    originalName: file.name,
+    fileName,
+    data,
+  }
   input.value = ""
 }
 
@@ -809,6 +989,375 @@ function clearTrack(trackIndex: number) {
   track.hits = Array(notes.value.length).fill(false)
 }
 
+function getExportSampleForTrack(track: Track, trackIndex: number): ExportSample | null {
+  if (track.sampleSource === "custom" && track.customSample) {
+    return {
+      sampleName: track.customSample.fileName,
+      bank: track.customSample.bank,
+      sound: track.customSample.sound,
+      sampleIndex: track.customSample.sampleIndex,
+      trackIndex,
+      fileName: track.customSample.fileName,
+      data: track.customSample.data,
+    }
+  }
+
+  const match = track.sampleName
+    .toLowerCase()
+    .match(/^(normal|soft|drum)-(hitnormal|hitwhistle|hitfinish|hitclap|sliderwhistle)\.wav$/)
+
+  if (!match) {
+    return null
+  }
+
+  return {
+    sampleName: track.sampleName,
+    bank: match[1] as SampleBank,
+    sound: match[2] as SampleSound,
+    sampleIndex: 1,
+    trackIndex,
+    fileName: track.sampleName,
+  }
+}
+
+function getSelectedExportSample(noteIndex: number) {
+  let selectedSample: ExportSample | null = null
+
+  // TODO: Resolve true hitsound conflicts explicitly in the UI. For now, the
+  // highest-numbered track wins when multiple tracks hit the same osu slot.
+  tracks.value.forEach((track, trackIndex) => {
+    if (!track.hits[noteIndex]) {
+      return
+    }
+
+    const exportSample = getExportSampleForTrack(track, trackIndex)
+
+    if (exportSample) {
+      selectedSample = exportSample
+    }
+  })
+
+  return selectedSample
+}
+
+function buildSourceHitsoundAssignments() {
+  const assignments = new Map<number, SourceHitsoundAssignment>()
+  const fallbackSample = getFallbackExportSample()
+  const sourceSlots = new Map<number, { hasHead: boolean, hasSliderEnd: boolean }>()
+
+  for (const note of notes.value) {
+    const slots = sourceSlots.get(note.sourceIndex) ?? { hasHead: false, hasSliderEnd: false }
+
+    if (note.kind === "slider-end") {
+      slots.hasSliderEnd = true
+    } else if (note.kind !== "slider-body") {
+      slots.hasHead = true
+    }
+
+    sourceSlots.set(note.sourceIndex, slots)
+
+    const exportSample = getSelectedExportSample(note.index)
+
+    if (!exportSample) {
+      continue
+    }
+
+    const assignment = assignments.get(note.sourceIndex) ?? {}
+
+    if (note.kind === "slider-end") {
+      assignment.sliderEnd = exportSample
+    } else if (note.kind === "slider-body") {
+      assignment.sliderBody = exportSample
+    } else {
+      assignment.head = exportSample
+    }
+
+    assignments.set(note.sourceIndex, assignment)
+  }
+
+  for (const [sourceIndex, slots] of sourceSlots.entries()) {
+    const assignment = assignments.get(sourceIndex) ?? {}
+
+    if (slots.hasHead && !assignment.head) {
+      assignment.head = fallbackSample
+    }
+
+    if (slots.hasSliderEnd && !assignment.sliderEnd) {
+      assignment.sliderEnd = fallbackSample
+    }
+
+    assignments.set(sourceIndex, assignment)
+  }
+
+  return assignments
+}
+
+function getHitSoundBit(sound: ExportSample["sound"]) {
+  const bits: Record<ExportSample["sound"], number> = {
+    hitnormal: 0,
+    hitwhistle: 2,
+    hitfinish: 4,
+    hitclap: 8,
+    sliderwhistle: 2,
+  }
+
+  return bits[sound]
+}
+
+function getSampleSetId(bank: ExportSample["bank"]) {
+  const ids: Record<ExportSample["bank"], number> = {
+    normal: 1,
+    soft: 2,
+    drum: 3,
+  }
+
+  return ids[bank]
+}
+
+function parseHitSample(rawHitSample = "0:0:0:0:") {
+  const parts = rawHitSample.split(":")
+
+  return {
+    normalSet: Number(parts[0]) || 0,
+    additionSet: Number(parts[1]) || 0,
+    index: Number(parts[2]) || 0,
+    volume: Number(parts[3]) || 0,
+    filename: parts.slice(4).join(":"),
+  }
+}
+
+function formatHitSample(hitSample: ReturnType<typeof parseHitSample>) {
+  return [
+    hitSample.normalSet,
+    hitSample.additionSet,
+    hitSample.index,
+    hitSample.volume,
+    hitSample.filename,
+  ].join(":")
+}
+
+function applySampleToHitSample(rawHitSample: string | undefined, sample: ExportSample) {
+  const hitSample = parseHitSample(rawHitSample)
+  const sampleSetId = getSampleSetId(sample.bank)
+
+  hitSample.filename = ""
+
+  if (sample.sound === "hitnormal") {
+    hitSample.normalSet = sampleSetId
+  } else {
+    hitSample.additionSet = sampleSetId
+  }
+
+  hitSample.index = sample.sampleIndex
+
+  return formatHitSample(hitSample)
+}
+
+function getHitSamplePartIndex(kind: HitObjectKind) {
+  if (kind === "slider") {
+    return 10
+  }
+
+  if (kind === "spinner") {
+    return 6
+  }
+
+  if (kind === "circle") {
+    return 5
+  }
+
+  return -1
+}
+
+function applyHeadHitsound(parts: string[], kind: HitObjectKind, sample: ExportSample) {
+  parts[4] = String(getHitSoundBit(sample.sound))
+
+  const hitSamplePartIndex = getHitSamplePartIndex(kind)
+
+  if (hitSamplePartIndex >= 0) {
+    parts[hitSamplePartIndex] = applySampleToHitSample(parts[hitSamplePartIndex], sample)
+    return
+  }
+
+  if (kind === "hold" && parts[5]) {
+    const [endTime, ...rawHitSampleParts] = parts[5].split(":")
+    const hitSample = applySampleToHitSample(rawHitSampleParts.join(":"), sample)
+
+    parts[5] = `${endTime}:${hitSample}`
+  }
+}
+
+function normalizeSliderEdgeParts(parts: string[]) {
+  const slides = Math.max(1, Number(parts[6]) || 1)
+  const edgeCount = slides + 1
+  const edgeSounds = (parts[8] || "").split("|").filter(Boolean)
+  const edgeSets = (parts[9] || "").split("|").filter(Boolean)
+
+  while (edgeSounds.length < edgeCount) {
+    edgeSounds.push("0")
+  }
+
+  while (edgeSets.length < edgeCount) {
+    edgeSets.push("0:0")
+  }
+
+  parts[8] = edgeSounds.join("|")
+  parts[9] = edgeSets.join("|")
+
+  if (parts.length <= 10) {
+    parts[10] = parts[10] ?? "0:0:0:0:"
+  }
+
+  return { edgeSounds, edgeSets }
+}
+
+function formatEdgeSet(sample: ExportSample) {
+  const sampleSetId = getSampleSetId(sample.bank)
+
+  return sample.sound === "hitnormal" ? `${sampleSetId}:0` : `0:${sampleSetId}`
+}
+
+function applySliderEdgeHitsound(
+  parts: string[],
+  sample: ExportSample,
+  edge: "head" | "end",
+) {
+  const { edgeSounds, edgeSets } = normalizeSliderEdgeParts(parts)
+  const edgeIndex = edge === "head" ? 0 : edgeSounds.length - 1
+
+  edgeSounds[edgeIndex] = String(getHitSoundBit(sample.sound))
+  edgeSets[edgeIndex] = formatEdgeSet(sample)
+  parts[8] = edgeSounds.join("|")
+  parts[9] = edgeSets.join("|")
+  parts[10] = applySampleToHitSample(parts[10], sample)
+}
+
+function chooseHigherTrackSample(
+  left: ExportSample | undefined,
+  right: ExportSample | undefined,
+) {
+  if (!left) {
+    return right
+  }
+
+  if (!right) {
+    return left
+  }
+
+  return right.trackIndex > left.trackIndex ? right : left
+}
+
+function rewriteHitObjectLine(line: string, assignment: SourceHitsoundAssignment) {
+  const parts = line.split(",")
+  const kind = getObjectKind(Number(parts[3]))
+
+  if (kind === "slider") {
+    const sliderHeadSample = chooseHigherTrackSample(
+      assignment.head,
+      assignment.sliderBody?.sound === "sliderwhistle" ? assignment.sliderBody : undefined,
+    )
+
+    if (sliderHeadSample) {
+      applyHeadHitsound(parts, kind, sliderHeadSample)
+      applySliderEdgeHitsound(parts, sliderHeadSample, "head")
+    }
+
+    if (assignment.sliderEnd) {
+      applySliderEdgeHitsound(parts, assignment.sliderEnd, "end")
+    }
+  } else if (assignment.head) {
+    applyHeadHitsound(parts, kind, assignment.head)
+  }
+
+  return parts.join(",")
+}
+
+function buildHitsoundedOsuText() {
+  if (!originalOsuText.value || !hitObjectLineIndices.value.length) {
+    return ""
+  }
+
+  const lines = originalOsuText.value.split(/\r?\n/)
+  const assignments = buildSourceHitsoundAssignments()
+
+  for (const [sourceIndex, assignment] of assignments.entries()) {
+    const lineIndex = hitObjectLineIndices.value[sourceIndex]
+
+    if (lineIndex === undefined || !lines[lineIndex]) {
+      continue
+    }
+
+    lines[lineIndex] = rewriteHitObjectLine(lines[lineIndex], assignment)
+  }
+
+  return lines.join("\n")
+}
+
+function getUsedExportSamples() {
+  const samplesByFileName = new Map<string, ExportSample>()
+
+  if (notes.value.length) {
+    const fallbackSample = getFallbackExportSample()
+
+    if (fallbackSample.data) {
+      samplesByFileName.set(fallbackSample.fileName, fallbackSample)
+    }
+  }
+
+  tracks.value.forEach((track, trackIndex) => {
+    if (!track.hits.some(Boolean)) {
+      return
+    }
+
+    const sample = getExportSampleForTrack(track, trackIndex)
+
+    if (!sample) {
+      return
+    }
+
+    // TODO: Surface duplicate export filenames in the UI. For now, later
+    // tracks overwrite earlier tracks, matching the hitsound conflict rule.
+    if (sample.data) {
+      samplesByFileName.set(sample.fileName, sample)
+    }
+  })
+
+  return [...samplesByFileName.values()]
+}
+
+async function addSampleToZip(zip: InstanceType<typeof import("jszip").default>, sample: ExportSample) {
+  if (sample.data) {
+    zip.file(sample.fileName, sample.data)
+  }
+}
+
+async function downloadHitsoundedOsu() {
+  const hitsoundedOsuText = buildHitsoundedOsuText()
+
+  if (!hitsoundedOsuText) {
+    return
+  }
+
+  const { default: JSZip } = await import("jszip")
+  const zip = new JSZip()
+  const baseName = originalOsuFileName.value.replace(/\.osu$/i, "") || "beatmap"
+
+  zip.file(`${baseName} [hitsounded].osu`, hitsoundedOsuText)
+
+  for (const sample of getUsedExportSamples()) {
+    await addSampleToZip(zip, sample)
+  }
+
+  const blob = await zip.generateAsync({ type: "blob" })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement("a")
+
+  link.href = url
+  link.download = `${baseName} [hitsounded].zip`
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
 function toggleHit(trackIndex: number, noteIndex: number) {
   const track = tracks.value[trackIndex]
 
@@ -879,6 +1428,10 @@ function selectionRangeStyle() {
 function startRangeSelection(event: PointerEvent, trackIndex: number) {
   const target = event.target as HTMLElement | null
 
+  if (event.button !== 0) {
+    return
+  }
+
   if (target?.closest("button, input, label, audio, .lane-label")) {
     return
   }
@@ -923,6 +1476,15 @@ function finishRangeSelection() {
         tracks.value[selectionTrackIndex.value ?? 0]?.name ?? "track"
       }.`
     : ""
+}
+
+function clearSelection() {
+  selectionTrackIndex.value = null
+  selectionAnchorMs.value = null
+  selectionFocusMs.value = null
+  isSelectingRange.value = false
+  suppressNextTimelineClick.value = false
+  clipboardStatus.value = "Selection cleared."
 }
 
 function copySelection() {
@@ -1052,6 +1614,12 @@ function handleGlobalKeydown(event: KeyboardEvent) {
   if (event.key === "Delete") {
     event.preventDefault()
     clearSelectedRegion()
+    return
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault()
+    clearSelection()
     return
   }
 
@@ -1315,21 +1883,134 @@ function updateTimelineViewport() {
   timelineViewportWidth.value = scroller.clientWidth
 }
 
+function getWheelDeltaMultiplier(event: WheelEvent) {
+  return event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? timelineScroll.value?.clientWidth ?? 1 : 1
+}
+
+function clampZoom(value: number) {
+  return Math.min(900, Math.max(60, value))
+}
+
+function zoomTimelineAtClientX(clientX: number, wheelDelta: number) {
+  const scroller = timelineScroll.value
+
+  if (!scroller) {
+    return
+  }
+
+  const rect = scroller.getBoundingClientRect()
+  const xInViewport = clientX - rect.left
+  const xInContent = scroller.scrollLeft + xInViewport
+  const timeAtCursorMs =
+    timelineStartMs.value +
+    (Math.max(0, xInContent - laneLabelWidth) / pixelsPerSecond.value) * 1_000
+  const zoomFactor = Math.exp(-wheelDelta * 0.0015)
+  const nextZoom = clampZoom(Math.round(pixelsPerSecond.value * zoomFactor))
+
+  if (nextZoom === pixelsPerSecond.value) {
+    return
+  }
+
+  pixelsPerSecond.value = nextZoom
+
+  void nextTick(() => {
+    const nextXInContent = timeToPixel(timeAtCursorMs)
+    scroller.scrollLeft = Math.max(0, nextXInContent - xInViewport)
+    updateTimelineViewport()
+  })
+}
+
 function handleTimelineWheel(event: WheelEvent) {
   const scroller = timelineScroll.value
 
-  if (!scroller || event.ctrlKey) {
+  if (!scroller) {
     return
   }
 
   event.preventDefault()
 
-  const deltaModeMultiplier = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? scroller.clientWidth : 1
+  const deltaModeMultiplier = getWheelDeltaMultiplier(event)
+
+  if (event.ctrlKey) {
+    zoomTimelineAtClientX(event.clientX, event.deltaY * deltaModeMultiplier)
+    return
+  }
+
+  const target = event.target as HTMLElement | null
+
+  if (target?.closest(".lane-label, .ruler-label")) {
+    scroller.scrollTop += event.deltaY * deltaModeMultiplier
+    scroller.scrollLeft += event.deltaX * deltaModeMultiplier
+    updateTimelineViewport()
+    return
+  }
+
   const dominantDelta =
     Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
 
   scroller.scrollLeft += dominantDelta * deltaModeMultiplier
   updateTimelineViewport()
+}
+
+function startTimelinePan(event: PointerEvent) {
+  const scroller = timelineScroll.value
+
+  if (!scroller || event.button !== 2) {
+    return
+  }
+
+  event.preventDefault()
+  isPanningTimeline.value = true
+  timelinePanPointerId = event.pointerId
+  timelinePanStartX = event.clientX
+  timelinePanStartY = event.clientY
+  timelinePanStartScrollLeft = scroller.scrollLeft
+  timelinePanStartScrollTop = scroller.scrollTop
+  scroller.setPointerCapture(event.pointerId)
+}
+
+function updateTimelinePan(event: PointerEvent) {
+  const scroller = timelineScroll.value
+
+  if (!scroller || !isPanningTimeline.value || event.pointerId !== timelinePanPointerId) {
+    return
+  }
+
+  event.preventDefault()
+  scroller.scrollLeft = timelinePanStartScrollLeft - (event.clientX - timelinePanStartX)
+  scroller.scrollTop = timelinePanStartScrollTop - (event.clientY - timelinePanStartY)
+  updateTimelineViewport()
+}
+
+function finishTimelinePan(event: PointerEvent) {
+  const scroller = timelineScroll.value
+
+  if (!isPanningTimeline.value || event.pointerId !== timelinePanPointerId) {
+    return
+  }
+
+  event.preventDefault()
+  scroller?.releasePointerCapture(event.pointerId)
+  isPanningTimeline.value = false
+  timelinePanPointerId = null
+}
+
+function handleTimelinePointerMove(event: PointerEvent) {
+  updateTimelinePan(event)
+  updateRangeSelection(event)
+}
+
+function handleTimelinePointerUp(event: PointerEvent) {
+  finishTimelinePan(event)
+  finishRangeSelection()
+}
+
+function handleTimelinePointerLeave(event: PointerEvent) {
+  if (isPanningTimeline.value) {
+    finishTimelinePan(event)
+  }
+
+  finishRangeSelection()
 }
 
 function getTimelineTimeFromClientX(clientX: number) {
@@ -1523,11 +2204,27 @@ onBeforeUnmount(() => {
           <input accept="audio/*" type="file" @change="handleBackingUpload" />
         </label>
 
+        <label class="compact-upload">
+          <span>Fallback soft-hitnormal</span>
+          <input accept="audio/*" type="file" @change="handleFallbackSampleUpload" />
+        </label>
+
+        <button
+          class="ghost-button export-button"
+          type="button"
+          :disabled="!notes.length"
+          @click="downloadHitsoundedOsu"
+        >
+          Download hitsounded ZIP
+        </button>
       </div>
 
       <p v-if="mapInfo?.audioFilename" class="hint upload-hint">
         Referenced audio: <code>{{ mapInfo.audioFilename }}</code>
         <span v-if="backingAudioName"> Loaded: {{ backingAudioName }}</span>
+        <span v-if="fallbackCustomSample">
+          Fallback sample: {{ fallbackCustomSample.originalName }} as soft-hitnormal.wav
+        </span>
       </p>
 
       <audio
@@ -1603,10 +2300,13 @@ onBeforeUnmount(() => {
       <div
         ref="timelineScroll"
         class="timeline-scroll"
+        :class="{ panning: isPanningTimeline }"
         @click="handleTimelineSeek"
-        @pointermove="updateRangeSelection"
-        @pointerup="finishRangeSelection"
-        @pointerleave="finishRangeSelection"
+        @contextmenu.prevent
+        @pointerdown="startTimelinePan"
+        @pointermove="handleTimelinePointerMove"
+        @pointerup="handleTimelinePointerUp"
+        @pointerleave="handleTimelinePointerLeave"
         @scroll="updateTimelineViewport"
         @wheel="handleTimelineWheel"
       >
@@ -1727,6 +2427,27 @@ onBeforeUnmount(() => {
               <option value="" disabled>Choose default</option>
               <option v-for="sample in defaultSamples" :key="sample.url" :value="sample.url">
                 {{ sample.name }}
+              </option>
+            </select>
+          </label>
+          <label>
+            <span>Custom set</span>
+            <input
+              v-model.number="track.customSampleIndex"
+              min="1"
+              step="1"
+              type="number"
+              @change="handleCustomSampleIndexChange(trackIndex)"
+            />
+          </label>
+          <label>
+            <span>Custom type</span>
+            <select
+              :value="`${track.customSampleBank}-${track.customSampleSound}`"
+              @change="handleCustomSampleTypeChange($event, trackIndex)"
+            >
+              <option v-for="sampleType in sampleTypeOptions" :key="sampleType.label" :value="sampleType.label">
+                {{ sampleType.label }}
               </option>
             </select>
           </label>
@@ -1929,8 +2650,8 @@ button:disabled {
 
 .track-card {
   display: grid;
-  flex: 0 0 640px;
-  grid-template-columns: 120px 64px minmax(150px, 1fr) 130px minmax(120px, 0.8fr) auto;
+  flex: 0 0 860px;
+  grid-template-columns: 112px 52px minmax(138px, 1fr) 72px minmax(138px, 1fr) 128px minmax(116px, 0.8fr) auto;
   align-items: end;
   gap: 8px;
   padding: 10px;
@@ -1962,7 +2683,8 @@ button:disabled {
 
 .track-name,
 .compact-control input,
-.track-card select {
+.track-card select,
+.track-card input[type="number"] {
   width: 100%;
   border: 1px solid rgba(148, 163, 184, 0.28);
   border-radius: 10px;
@@ -2104,9 +2826,15 @@ button:disabled {
   border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 18px;
   background: rgba(2, 6, 23, 0.45);
+  cursor: default;
   scrollbar-width: none;
   -ms-overflow-style: none;
   overscroll-behavior: contain;
+}
+
+.timeline-scroll.panning {
+  cursor: grabbing;
+  user-select: none;
 }
 
 .timeline-scroll::-webkit-scrollbar {
