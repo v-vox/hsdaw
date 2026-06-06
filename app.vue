@@ -66,7 +66,13 @@ type RawTimingPoint = {
   timeMs: number
   beatLengthMs: number
   meter: number
+  sampleSet: number
   uninherited: boolean
+}
+
+type RawEdgeSet = {
+  normalSet: number
+  additionSet: number
 }
 
 type RawHitObject = {
@@ -76,6 +82,10 @@ type RawHitObject = {
   timeMs: number
   objectType: number
   kind: HitObjectKind
+  hitSound: number
+  hitSample: string
+  edgeSounds: number[]
+  edgeSets: RawEdgeSet[]
   slides: number
   pixelLength: number
 }
@@ -489,6 +499,26 @@ function createTrack(name: string, noteCount: number): Track {
   }
 }
 
+function createTrackForSample(sampleName: string, hits: boolean[]): Track {
+  trackIdSeed += 1
+
+  const defaultSample = defaultSamples.find((sample) => sample.name === sampleName)
+  const parsedSample = parseSampleName(sampleName)
+
+  return {
+    id: trackIdSeed,
+    name: sampleName.replace(/\.wav$/i, ""),
+    sampleName,
+    sampleUrl: defaultSample?.url ?? null,
+    sampleSource: defaultSample ? "default" : "none",
+    customSampleBank: parsedSample?.bank ?? "normal",
+    customSampleSound: parsedSample?.sound ?? "hitnormal",
+    customSampleIndex: parsedSample?.sampleIndex ?? 1,
+    customSample: null,
+    hits,
+  }
+}
+
 async function handleOsuUpload(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
@@ -508,10 +538,15 @@ async function handleOsuUpload(event: Event) {
   mapInfo.value = parsed.info
   notes.value = parsed.notes
   timingPoints.value = parsed.timingPoints
-  tracks.value = tracks.value.map((track) => ({
-    ...track,
-    hits: Array(parsed.notes.length).fill(false),
-  }))
+  tracks.value =
+    parsed.importedTrackHits.size > 0
+      ? [...parsed.importedTrackHits.entries()].map(([sampleName, hits]) =>
+          createTrackForSample(sampleName, hits),
+        )
+      : tracks.value.map((track) => ({
+          ...track,
+          hits: Array(parsed.notes.length).fill(false),
+        }))
   currentTimeMs.value = playbackStartMs.value
   playbackAnchorMs.value = playbackStartMs.value
   input.value = ""
@@ -532,6 +567,7 @@ function parseOsuFile(text: string) {
   const rawTimingPoints: RawTimingPoint[] = []
   let section = ""
   let audioFilename = ""
+  let defaultSampleSetId = 1
 
   for (const [lineIndex, rawLine] of rawLines.entries()) {
     const line = rawLine.trim()
@@ -573,6 +609,10 @@ function parseOsuFile(text: string) {
       if (key === "AudioFilename") {
         audioFilename = value
       }
+
+      if (section === "General" && key === "SampleSet") {
+        defaultSampleSetId = getSampleSetIdFromName(value)
+      }
     }
 
     if (section === "TimingPoints") {
@@ -580,6 +620,7 @@ function parseOsuFile(text: string) {
       const timeMs = Number(parts[0])
       const beatLengthMs = Number(parts[1])
       const meter = Number(parts[2]) || 4
+      const sampleSet = Number(parts[3]) || 0
       const uninherited = parts[6] === undefined || parts[6] === "1"
 
       if (Number.isFinite(timeMs) && Number.isFinite(beatLengthMs)) {
@@ -587,6 +628,7 @@ function parseOsuFile(text: string) {
           timeMs,
           beatLengthMs,
           meter,
+          sampleSet,
           uninherited,
         })
       }
@@ -620,6 +662,7 @@ function parseOsuFile(text: string) {
     const timeMs = Number(rawTime)
     const objectType = Number(rawType)
     const kind = getObjectKind(objectType)
+    const hitSound = Number(parts[4]) || 0
 
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(timeMs)) {
       continue
@@ -635,6 +678,10 @@ function parseOsuFile(text: string) {
       timeMs,
       objectType,
       kind,
+      hitSound,
+      hitSample: getRawHitSample(parts, kind),
+      edgeSounds: kind === "slider" ? parseEdgeSounds(parts[8]) : [],
+      edgeSets: kind === "slider" ? parseEdgeSets(parts[9]) : [],
       slides: kind === "slider" ? Number(parts[6]) || 1 : 1,
       pixelLength: kind === "slider" ? Number(parts[7]) || 0 : 0,
     })
@@ -673,6 +720,12 @@ function parseOsuFile(text: string) {
     notes: parsedNotes,
     timingPoints: parsedTimingPoints,
     hitObjectLineIndices: parsedHitObjectLineIndices,
+    importedTrackHits: buildImportedTrackHits(
+      parsedNotes,
+      hitObjects,
+      rawTimingPoints,
+      defaultSampleSetId,
+    ),
   }
 }
 
@@ -723,6 +776,240 @@ function createSlot(
     objectType: hitObject.objectType,
     kind,
   }
+}
+
+function getSampleSetIdFromName(name: string) {
+  const normalizedName = name.trim().toLowerCase()
+
+  if (normalizedName === "soft") {
+    return 2
+  }
+
+  if (normalizedName === "drum") {
+    return 3
+  }
+
+  return 1
+}
+
+function getSampleBankFromId(sampleSetId: number): SampleBank {
+  if (sampleSetId === 2) {
+    return "soft"
+  }
+
+  if (sampleSetId === 3) {
+    return "drum"
+  }
+
+  return "normal"
+}
+
+function parseSampleName(sampleName: string) {
+  const match = sampleName
+    .toLowerCase()
+    .match(/^(normal|soft|drum)-(hitnormal|hitwhistle|hitfinish|hitclap|sliderwhistle)(\d*)\.wav$/)
+
+  if (!match) {
+    return null
+  }
+
+  return {
+    bank: match[1] as SampleBank,
+    sound: match[2] as SampleSound,
+    sampleIndex: Number(match[3]) || 1,
+  }
+}
+
+function getRawHitSample(parts: string[], kind: HitObjectKind) {
+  if (kind === "slider") {
+    return parts[10] || "0:0:0:0:"
+  }
+
+  if (kind === "spinner") {
+    return parts[6] || "0:0:0:0:"
+  }
+
+  if (kind === "hold" && parts[5]) {
+    return parts[5].split(":").slice(1).join(":") || "0:0:0:0:"
+  }
+
+  return parts[5] || "0:0:0:0:"
+}
+
+function parseEdgeSounds(rawEdgeSounds = "") {
+  return rawEdgeSounds
+    .split("|")
+    .filter(Boolean)
+    .map((value) => Number(value) || 0)
+}
+
+function parseEdgeSets(rawEdgeSets = "") {
+  return rawEdgeSets
+    .split("|")
+    .filter(Boolean)
+    .map((edgeSet) => {
+      const [normalSet, additionSet] = edgeSet.split(":")
+
+      return {
+        normalSet: Number(normalSet) || 0,
+        additionSet: Number(additionSet) || 0,
+      }
+    })
+}
+
+function getEffectiveTimingSampleSet(
+  rawTimingPoints: RawTimingPoint[],
+  timeMs: number,
+  defaultSampleSetId: number,
+) {
+  let activeSampleSet = defaultSampleSetId
+
+  for (const timingPoint of rawTimingPoints) {
+    if (timingPoint.timeMs > timeMs) {
+      break
+    }
+
+    if (timingPoint.sampleSet > 0) {
+      activeSampleSet = timingPoint.sampleSet
+    }
+  }
+
+  return activeSampleSet
+}
+
+function addImportedSampleHit(
+  importedTrackHits: Map<string, boolean[]>,
+  note: OsuNote,
+  bank: SampleBank,
+  sound: SampleSound,
+  sampleIndex: number,
+  noteCount: number,
+) {
+  const sampleName = getSampleFileName(bank, sound, sampleIndex)
+  const hits = importedTrackHits.get(sampleName) ?? Array(noteCount).fill(false)
+
+  hits[note.index] = true
+  importedTrackHits.set(sampleName, hits)
+}
+
+function addImportedLayerHits(
+  importedTrackHits: Map<string, boolean[]>,
+  note: OsuNote,
+  hitSound: number,
+  normalSet: number,
+  additionSet: number,
+  sampleIndex: number,
+  effectiveSampleSet: number,
+  noteCount: number,
+) {
+  addImportedSampleHit(
+    importedTrackHits,
+    note,
+    normalSet > 0 ? getSampleBankFromId(normalSet) : "soft",
+    "hitnormal",
+    normalSet > 0 ? sampleIndex : 1,
+    noteCount,
+  )
+
+  const effectiveAdditionSet = additionSet || normalSet || effectiveSampleSet
+  const additionBank = getSampleBankFromId(effectiveAdditionSet)
+
+  if ((hitSound & getHitSoundBit("hitwhistle")) !== 0) {
+    addImportedSampleHit(importedTrackHits, note, additionBank, "hitwhistle", sampleIndex, noteCount)
+  }
+
+  if ((hitSound & getHitSoundBit("hitfinish")) !== 0) {
+    addImportedSampleHit(importedTrackHits, note, additionBank, "hitfinish", sampleIndex, noteCount)
+  }
+
+  if ((hitSound & getHitSoundBit("hitclap")) !== 0) {
+    addImportedSampleHit(importedTrackHits, note, additionBank, "hitclap", sampleIndex, noteCount)
+  }
+}
+
+function buildImportedTrackHits(
+  parsedNotes: OsuNote[],
+  hitObjects: RawHitObject[],
+  rawTimingPoints: RawTimingPoint[],
+  defaultSampleSetId: number,
+) {
+  const importedTrackHits = new Map<string, boolean[]>()
+  const hitObjectsBySource = new Map(hitObjects.map((hitObject) => [hitObject.sourceIndex, hitObject]))
+  const noteCount = parsedNotes.length
+
+  for (const note of parsedNotes) {
+    const hitObject = hitObjectsBySource.get(note.sourceIndex)
+
+    if (!hitObject) {
+      continue
+    }
+
+    const hitSample = parseHitSample(hitObject.hitSample)
+    const sampleIndex = hitSample.index || 1
+    const effectiveSampleSet = getEffectiveTimingSampleSet(
+      rawTimingPoints,
+      hitObject.timeMs,
+      defaultSampleSetId,
+    )
+
+    if (note.kind === "slider-end") {
+      const edgeSound = hitObject.edgeSounds.at(-1) ?? 0
+      const edgeSet = hitObject.edgeSets.at(-1) ?? { normalSet: 0, additionSet: 0 }
+
+      addImportedLayerHits(
+        importedTrackHits,
+        note,
+        edgeSound,
+        edgeSet.normalSet,
+        edgeSet.additionSet,
+        sampleIndex,
+        effectiveSampleSet,
+        noteCount,
+      )
+      continue
+    }
+
+    if (note.kind === "slider-body") {
+      // Slider body whistle is encoded through the same slider-level hitSound
+      // field that also affects the slider head. Importing it automatically
+      // turns ordinary head whistles into body whistles, so keep body slots
+      // opt-in in this editor.
+      continue
+    }
+
+    if (hitObject.kind === "slider") {
+      const edgeSound = hitObject.edgeSounds[0] ?? hitObject.hitSound
+      const edgeSet = hitObject.edgeSets[0] ?? {
+        normalSet: hitSample.normalSet,
+        additionSet: hitSample.additionSet,
+      }
+
+      addImportedLayerHits(
+        importedTrackHits,
+        note,
+        edgeSound,
+        edgeSet.normalSet,
+        edgeSet.additionSet,
+        sampleIndex,
+        effectiveSampleSet,
+        noteCount,
+      )
+      continue
+    }
+
+    addImportedLayerHits(
+      importedTrackHits,
+      note,
+      hitObject.hitSound,
+      hitSample.normalSet,
+      hitSample.additionSet,
+      sampleIndex,
+      effectiveSampleSet,
+      noteCount,
+    )
+  }
+
+  return importedTrackHits
 }
 
 function getSliderDurationMs(
@@ -1238,19 +1525,17 @@ function getExportSampleForTrack(track: Track, trackIndex: number): ExportSample
     }
   }
 
-  const match = track.sampleName
-    .toLowerCase()
-    .match(/^(normal|soft|drum)-(hitnormal|hitwhistle|hitfinish|hitclap|sliderwhistle)\.wav$/)
+  const parsedSample = parseSampleName(track.sampleName)
 
-  if (!match) {
+  if (!parsedSample) {
     return null
   }
 
   return {
     sampleName: track.sampleName,
-    bank: match[1] as SampleBank,
-    sound: match[2] as SampleSound,
-    sampleIndex: 1,
+    bank: parsedSample.bank,
+    sound: parsedSample.sound,
+    sampleIndex: parsedSample.sampleIndex,
     trackIndex,
     fileName: track.sampleName,
   }
