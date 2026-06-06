@@ -283,6 +283,7 @@ const suppressNextTimelineClick = ref(false)
 const isTrackDrawerOpen = ref(true)
 const isPanningTimeline = ref(false)
 const fallbackCustomSample = ref<CustomSample | null>(null)
+const shortcutSelectionScope = ref<"all-tracks" | "active-track" | null>(null)
 
 let trackIdSeed = 0
 let tone: ToneNamespace | null = null
@@ -2081,6 +2082,10 @@ function finishRangeSelection() {
         tracks.value[selectionTrackIndex.value ?? 0]?.name ?? "track"
       }.`
     : ""
+
+  if (hasSelection.value) {
+    shortcutSelectionScope.value = null
+  }
 }
 
 function clearSelection() {
@@ -2089,6 +2094,7 @@ function clearSelection() {
   selectionFocusMs.value = null
   isSelectingRange.value = false
   suppressNextTimelineClick.value = false
+  shortcutSelectionScope.value = null
   clipboardStatus.value = "Selection cleared."
 }
 
@@ -2162,6 +2168,49 @@ function pasteSelection() {
 
 function clearSelectedRegion() {
   if (!hasSelection.value || selectionTrackIndex.value === null) {
+    if (shortcutSelectionScope.value === "all-tracks") {
+      let clearedCount = 0
+
+      for (const trackItem of tracks.value) {
+        for (let noteIndex = 0; noteIndex < trackItem.hits.length; noteIndex += 1) {
+          if (!trackItem.hits[noteIndex]) {
+            continue
+          }
+
+          trackItem.hits[noteIndex] = false
+          clearedCount += 1
+        }
+      }
+
+      shortcutSelectionScope.value = null
+      clipboardStatus.value = `Cleared ${clearedCount} hits across all tracks.`
+      return
+    }
+
+    if (shortcutSelectionScope.value === "active-track") {
+      const activeTrack = tracks.value[activeTrackIndex.value]
+
+      if (!activeTrack) {
+        clipboardStatus.value = "Select a track first."
+        return
+      }
+
+      let clearedCount = 0
+
+      for (let noteIndex = 0; noteIndex < activeTrack.hits.length; noteIndex += 1) {
+        if (!activeTrack.hits[noteIndex]) {
+          continue
+        }
+
+        activeTrack.hits[noteIndex] = false
+        clearedCount += 1
+      }
+
+      shortcutSelectionScope.value = null
+      clipboardStatus.value = `Cleared ${clearedCount} hits from ${activeTrack.name}.`
+      return
+    }
+
     clipboardStatus.value = "Drag across a track lane to select a region first."
     return
   }
@@ -2186,6 +2235,7 @@ function clearSelectedRegion() {
   }
 
   clipboardStatus.value = `Cleared ${clearedCount} hits from ${track.name}.`
+  shortcutSelectionScope.value = null
 }
 
 function selectAllNotesInAllTracks() {
@@ -2198,6 +2248,8 @@ function selectAllNotesInAllTracks() {
     track.hits.fill(true)
   }
 
+  clearSelection()
+  shortcutSelectionScope.value = "all-tracks"
   clipboardStatus.value = `Selected all ${notes.value.length} notes across ${tracks.value.length} tracks.`
 }
 
@@ -2210,6 +2262,8 @@ function selectAllNotesInActiveTrack() {
   }
 
   track.hits.fill(true)
+  clearSelection()
+  shortcutSelectionScope.value = "active-track"
   clipboardStatus.value = `Selected all ${notes.value.length} notes in ${track.name}.`
 }
 
