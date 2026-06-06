@@ -163,24 +163,33 @@ type SavedProject = {
   pixelsPerSecond: number
 }
 
+const runtimeConfig = useRuntimeConfig()
+const appBaseUrl = `${runtimeConfig.app.baseURL || "/"}`.replace(/\/?$/, "/")
+
+function resolvePublicAssetUrl(path: string) {
+  const normalizedPath = path.replace(/^\/+/, "")
+
+  return `${appBaseUrl}${normalizedPath}`
+}
+
 const laneLabelWidth = 190
 const markerDiameter = 22
 const defaultSamples: DefaultSample[] = [
-  { name: "drum-hitnormal.wav", url: "/samples/default/drum-hitnormal.wav" },
-  { name: "drum-hitclap.wav", url: "/samples/default/drum-hitclap.wav" },
-  { name: "drum-hitfinish.wav", url: "/samples/default/drum-hitfinish.wav" },
-  { name: "drum-hitwhistle.wav", url: "/samples/default/drum-hitwhistle.wav" },
-  { name: "drum-sliderwhistle.wav", url: "/samples/default/drum-sliderwhistle.wav" },
-  { name: "normal-hitnormal.wav", url: "/samples/default/normal-hitnormal.wav" },
-  { name: "normal-hitclap.wav", url: "/samples/default/normal-hitclap.wav" },
-  { name: "normal-hitfinish.wav", url: "/samples/default/normal-hitfinish.wav" },
-  { name: "normal-hitwhistle.wav", url: "/samples/default/normal-hitwhistle.wav" },
-  { name: "normal-sliderwhistle.wav", url: "/samples/default/normal-sliderwhistle.wav" },
-  { name: "soft-hitnormal.wav", url: "/samples/default/soft-hitnormal.wav" },
-  { name: "soft-hitclap.wav", url: "/samples/default/soft-hitclap.wav" },
-  { name: "soft-hitfinish.wav", url: "/samples/default/soft-hitfinish.wav" },
-  { name: "soft-hitwhistle.wav", url: "/samples/default/soft-hitwhistle.wav" },
-  { name: "soft-sliderwhistle.wav", url: "/samples/default/soft-sliderwhistle.wav" },
+  { name: "drum-hitnormal.wav", url: resolvePublicAssetUrl("samples/default/drum-hitnormal.wav") },
+  { name: "drum-hitclap.wav", url: resolvePublicAssetUrl("samples/default/drum-hitclap.wav") },
+  { name: "drum-hitfinish.wav", url: resolvePublicAssetUrl("samples/default/drum-hitfinish.wav") },
+  { name: "drum-hitwhistle.wav", url: resolvePublicAssetUrl("samples/default/drum-hitwhistle.wav") },
+  { name: "drum-sliderwhistle.wav", url: resolvePublicAssetUrl("samples/default/drum-sliderwhistle.wav") },
+  { name: "normal-hitnormal.wav", url: resolvePublicAssetUrl("samples/default/normal-hitnormal.wav") },
+  { name: "normal-hitclap.wav", url: resolvePublicAssetUrl("samples/default/normal-hitclap.wav") },
+  { name: "normal-hitfinish.wav", url: resolvePublicAssetUrl("samples/default/normal-hitfinish.wav") },
+  { name: "normal-hitwhistle.wav", url: resolvePublicAssetUrl("samples/default/normal-hitwhistle.wav") },
+  { name: "normal-sliderwhistle.wav", url: resolvePublicAssetUrl("samples/default/normal-sliderwhistle.wav") },
+  { name: "soft-hitnormal.wav", url: resolvePublicAssetUrl("samples/default/soft-hitnormal.wav") },
+  { name: "soft-hitclap.wav", url: resolvePublicAssetUrl("samples/default/soft-hitclap.wav") },
+  { name: "soft-hitfinish.wav", url: resolvePublicAssetUrl("samples/default/soft-hitfinish.wav") },
+  { name: "soft-hitwhistle.wav", url: resolvePublicAssetUrl("samples/default/soft-hitwhistle.wav") },
+  { name: "soft-sliderwhistle.wav", url: resolvePublicAssetUrl("samples/default/soft-sliderwhistle.wav") },
 ]
 const sampleTypeOptions: Array<{
   label: string
@@ -2253,7 +2262,13 @@ async function startPlaybackFrom(startTimeMs: number) {
 
   stopPlayback()
   await toneApi.start()
-  await rebuildPlayers(toneApi)
+
+  try {
+    await rebuildPlayers(toneApi)
+  } catch (error) {
+    // Keep transport/backing playback working even if one or more samples fail to load.
+    console.error("Failed to load one or more sample players.", error)
+  }
 
   const transport = toneApi.Transport
   const leadInSeconds = 0.08
