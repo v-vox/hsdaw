@@ -2776,7 +2776,7 @@ onBeforeUnmount(() => {
     <section class="panel upload-panel">
       <div class="upload-summary">
         <div>
-          <p class="eyebrow">osu sample DAW</p>
+          <p class="eyebrow">hitsound daw</p>
           <h1>{{ mapInfo ? mapTitle : "Place sounds on osu notes" }}</h1>
         </div>
         <p v-if="mapInfo">
