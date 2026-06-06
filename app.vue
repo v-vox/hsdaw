@@ -2188,6 +2188,31 @@ function clearSelectedRegion() {
   clipboardStatus.value = `Cleared ${clearedCount} hits from ${track.name}.`
 }
 
+function selectAllNotesInAllTracks() {
+  if (!tracks.value.length || !notes.value.length) {
+    clipboardStatus.value = "Load a map first."
+    return
+  }
+
+  for (const track of tracks.value) {
+    track.hits.fill(true)
+  }
+
+  clipboardStatus.value = `Selected all ${notes.value.length} notes across ${tracks.value.length} tracks.`
+}
+
+function selectAllNotesInActiveTrack() {
+  const track = tracks.value[activeTrackIndex.value]
+
+  if (!track || !notes.value.length) {
+    clipboardStatus.value = "Load a map first."
+    return
+  }
+
+  track.hits.fill(true)
+  clipboardStatus.value = `Selected all ${notes.value.length} notes in ${track.name}.`
+}
+
 function isTypingTarget(target: EventTarget | null) {
   const element = target as HTMLElement | null
 
@@ -2203,6 +2228,18 @@ function handleGlobalKeydown(event: KeyboardEvent) {
   }
 
   const key = event.key.toLowerCase()
+
+  if ((event.ctrlKey || event.metaKey) && key === "a") {
+    event.preventDefault()
+    selectAllNotesInAllTracks()
+    return
+  }
+
+  if ((event.ctrlKey || event.metaKey) && key === "k") {
+    event.preventDefault()
+    selectAllNotesInActiveTrack()
+    return
+  }
 
   if ((event.ctrlKey || event.metaKey) && key === "c") {
     event.preventDefault()
