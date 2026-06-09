@@ -14,8 +14,10 @@ type MapInfo = {
 }
 
 type HitObjectKind = "circle" | "slider" | "spinner" | "hold"
-type HitSlotKind = HitObjectKind | "slider-body" | "slider-end"
+type HitSlotKind = HitObjectKind | "slider-body" | "slider-repeat" | "slider-end"
 type SampleSource = "default" | "custom" | "none"
+type HitsoundPickerMode = "default" | "custom"
+type ChannelType = "regular" | "fx"
 type SampleBank = "normal" | "soft" | "drum"
 type SampleSound = "hitnormal" | "hitwhistle" | "hitfinish" | "hitclap" | "sliderwhistle"
 
@@ -33,6 +35,7 @@ type OsuNote = {
   id: string
   index: number
   sourceIndex: number
+  edgeIndex?: number
   x: number
   y: number
   timeMs: number
@@ -43,6 +46,8 @@ type OsuNote = {
 
 type Track = {
   id: number
+  channelType: ChannelType
+  collapsed: boolean
   name: string
   sampleName: string
   sampleUrl: string | null
@@ -51,7 +56,26 @@ type Track = {
   customSampleSound: SampleSound
   customSampleIndex: number
   customSample: CustomSample | null
+  regularNotes: RegularNote[]
+  fxClips: FxClip[]
   hits: boolean[]
+}
+
+type RegularNote = {
+  id: number
+  startMs: number
+  assignedNoteIndex: number | null
+}
+
+type FxClip = {
+  id: number
+  name: string
+  sampleUrl: string
+  mimeType: string
+  data: ArrayBuffer
+  startMs: number
+  durationMs: number
+  assignedNoteIndex: number | null
 }
 
 type TimingPoint = {
@@ -106,7 +130,20 @@ type CopiedPattern = {
   durationMs: number
   hits: Array<{
     offsetMs: number
+    trackOffset: number
   }>
+}
+
+type UndoTrackSnapshot = {
+  trackId: number
+  regularNotes: RegularNote[]
+  fxClips: Array<Pick<FxClip, "id" | "startMs" | "durationMs" | "assignedNoteIndex">>
+}
+
+type UndoSnapshot = {
+  tracks: UndoTrackSnapshot[]
+  selectedRegularNoteIds: string[]
+  activeTrackIndex: number
 }
 
 type ExportSample = {
@@ -129,6 +166,7 @@ type SourceHitsoundAssignment = {
   head?: HitsoundLayer
   sliderBody?: HitsoundLayer
   sliderEnd?: HitsoundLayer
+  sliderEdges?: Map<number, HitsoundLayer>
 }
 
 type SavedCustomSample = Omit<CustomSample, "data"> & {
@@ -136,6 +174,8 @@ type SavedCustomSample = Omit<CustomSample, "data"> & {
 }
 
 type SavedTrack = {
+  channelType?: ChannelType
+  collapsed?: boolean
   name: string
   sampleName: string
   sampleSource: SampleSource
@@ -143,7 +183,15 @@ type SavedTrack = {
   customSampleSound: SampleSound
   customSampleIndex: number
   customSample: SavedCustomSample | null
+  regularNotes?: SavedRegularNote[]
+  fxClips?: SavedFxClip[]
   hits: boolean[]
+}
+
+type SavedRegularNote = RegularNote
+
+type SavedFxClip = Omit<FxClip, "data" | "sampleUrl"> & {
+  dataUrl: string
 }
 
 type SavedProject = {
@@ -172,8 +220,15 @@ function resolvePublicAssetUrl(path: string) {
   return `${appBaseUrl}${normalizedPath}`
 }
 
-const laneLabelWidth = 190
+const laneLabelWidth = 280
+const timelineHeaderHeight = 82
+const closedTrackLaneHeight = 82
+const defaultPickerTrackLaneHeight = 280
+const customPickerTrackLaneHeight = 310
+const fxTrackLaneHeight = 82
+const guideSnapThresholdPx = 12
 const markerDiameter = 22
+const collapsedTrackLaneHeight = markerDiameter
 const defaultSamples: DefaultSample[] = [
   { name: "drum-hitnormal.wav", url: resolvePublicAssetUrl("samples/default/drum-hitnormal.wav") },
   { name: "drum-hitclap.wav", url: resolvePublicAssetUrl("samples/default/drum-hitclap.wav") },
@@ -191,27 +246,9 @@ const defaultSamples: DefaultSample[] = [
   { name: "soft-hitwhistle.wav", url: resolvePublicAssetUrl("samples/default/soft-hitwhistle.wav") },
   { name: "soft-sliderwhistle.wav", url: resolvePublicAssetUrl("samples/default/soft-sliderwhistle.wav") },
 ]
-const sampleTypeOptions: Array<{
-  label: string
-  bank: SampleBank
-  sound: SampleSound
-}> = [
-  { label: "normal-hitnormal", bank: "normal", sound: "hitnormal" },
-  { label: "normal-hitclap", bank: "normal", sound: "hitclap" },
-  { label: "normal-hitfinish", bank: "normal", sound: "hitfinish" },
-  { label: "normal-hitwhistle", bank: "normal", sound: "hitwhistle" },
-  { label: "normal-sliderwhistle", bank: "normal", sound: "sliderwhistle" },
-  { label: "soft-hitnormal", bank: "soft", sound: "hitnormal" },
-  { label: "soft-hitclap", bank: "soft", sound: "hitclap" },
-  { label: "soft-hitfinish", bank: "soft", sound: "hitfinish" },
-  { label: "soft-hitwhistle", bank: "soft", sound: "hitwhistle" },
-  { label: "soft-sliderwhistle", bank: "soft", sound: "sliderwhistle" },
-  { label: "drum-hitnormal", bank: "drum", sound: "hitnormal" },
-  { label: "drum-hitclap", bank: "drum", sound: "hitclap" },
-  { label: "drum-hitfinish", bank: "drum", sound: "hitfinish" },
-  { label: "drum-hitwhistle", bank: "drum", sound: "hitwhistle" },
-  { label: "drum-sliderwhistle", bank: "drum", sound: "sliderwhistle" },
-]
+const sampleBanks: SampleBank[] = ["soft", "normal", "drum"]
+const sampleSounds: SampleSound[] = ["hitnormal", "hitclap", "hitfinish", "hitwhistle", "sliderwhistle"]
+const maxUndoSnapshots = 60
 const trackPalette = [
   {
     accent: "#22d3ee",
@@ -276,25 +313,53 @@ const activeTrackIndex = ref(0)
 const selectionTrackIndex = ref<number | null>(null)
 const selectionAnchorMs = ref<number | null>(null)
 const selectionFocusMs = ref<number | null>(null)
+const selectionAnchorTrackIndex = ref<number | null>(null)
+const selectionFocusTrackIndex = ref<number | null>(null)
 const isSelectingRange = ref(false)
+const selectedRegularNoteIds = ref<Set<string>>(new Set())
 const copiedPattern = ref<CopiedPattern | null>(null)
 const clipboardStatus = ref("")
 const suppressNextTimelineClick = ref(false)
-const isTrackDrawerOpen = ref(true)
 const isPanningTimeline = ref(false)
 const fallbackCustomSample = ref<CustomSample | null>(null)
-const shortcutSelectionScope = ref<"all-tracks" | "active-track" | null>(null)
+const hsPickerModes = ref<Record<number, HitsoundPickerMode>>({})
+const hsPickerOpen = ref<Record<number, boolean>>({})
+const undoStack: UndoSnapshot[] = []
 
 let trackIdSeed = 0
+let fxClipIdSeed = 0
+let regularNoteIdSeed = 0
 let tone: ToneNamespace | null = null
 let animationFrameId: number | null = null
 let backingStartTimeoutId: number | null = null
 let players = new Map<number, import("tone").Player>()
+let fxPlayers = new Map<number, import("tone").Player>()
 let timelinePanPointerId: number | null = null
 let timelinePanStartX = 0
 let timelinePanStartY = 0
 let timelinePanStartScrollLeft = 0
 let timelinePanStartScrollTop = 0
+let fxClipDrag:
+  | {
+      trackIndex: number
+      clipId: number
+      startClientX: number
+      startMs: number
+    }
+  | null = null
+let regularNoteDrag:
+  | {
+      trackIndex: number
+      noteId: number
+      startClientX: number
+      startMs: number
+      notes: Array<{
+        trackIndex: number
+        noteId: number
+        startMs: number
+      }>
+    }
+  | null = null
 
 tracks.value = [
   createTrack("Kick", 0),
@@ -336,7 +401,7 @@ const mapTitle = computed(() => {
 
 const selectedHitsCount = computed(() =>
   tracks.value.reduce(
-    (total, track) => total + track.hits.filter(Boolean).length,
+    (total, track) => total + (track.channelType === "regular" ? track.regularNotes.length : 0),
     0,
   ),
 )
@@ -415,6 +480,9 @@ const rulerNotes = computed(() => {
 
 const markerSlots = computed(() => notes.value.filter((note) => note.kind !== "slider-body"))
 const sliderBodySlots = computed(() => notes.value.filter((note) => note.kind === "slider-body"))
+const sliderWhistleGuideSlots = computed(() =>
+  [...markerSlots.value, ...sliderBodySlots.value].sort((left, right) => noteDisplayTime(left) - noteDisplayTime(right)),
+)
 const virtualBufferMs = computed(() => Math.max(2_000, (timelineViewportWidth.value / pixelsPerSecond.value) * 1_000))
 const visibleRangeStartMs = computed(() => {
   const visibleStartPx = Math.max(0, timelineScrollLeft.value - laneLabelWidth)
@@ -466,13 +534,7 @@ const visibleSliderBodySlots = computed(() =>
     return endMs >= visibleRangeStartMs.value && startMs <= visibleRangeEndMs.value
   }),
 )
-const hasSelection = computed(
-  () =>
-    selectionTrackIndex.value !== null &&
-    selectionAnchorMs.value !== null &&
-    selectionFocusMs.value !== null &&
-    selectionEndMs.value > selectionStartMs.value,
-)
+const hasSelection = computed(() => selectedRegularNoteIds.value.size > 0)
 const selectionStartMs = computed(() => {
   if (selectionAnchorMs.value === null || selectionFocusMs.value === null) {
     return 0
@@ -488,6 +550,20 @@ const selectionEndMs = computed(() => {
   return Math.max(selectionAnchorMs.value, selectionFocusMs.value)
 })
 const selectionDurationMs = computed(() => Math.max(0, selectionEndMs.value - selectionStartMs.value))
+const selectionStartTrackIndex = computed(() => {
+  if (selectionAnchorTrackIndex.value === null || selectionFocusTrackIndex.value === null) {
+    return 0
+  }
+
+  return Math.min(selectionAnchorTrackIndex.value, selectionFocusTrackIndex.value)
+})
+const selectionEndTrackIndex = computed(() => {
+  if (selectionAnchorTrackIndex.value === null || selectionFocusTrackIndex.value === null) {
+    return 0
+  }
+
+  return Math.max(selectionAnchorTrackIndex.value, selectionFocusTrackIndex.value)
+})
 
 const canPlay = computed(() => notes.value.length > 0)
 
@@ -497,6 +573,8 @@ function createTrack(name: string, noteCount: number): Track {
 
   return {
     id: trackIdSeed,
+    channelType: "regular",
+    collapsed: false,
     name,
     sampleName: defaultSample?.name ?? "No sample",
     sampleUrl: defaultSample?.url ?? null,
@@ -505,7 +583,30 @@ function createTrack(name: string, noteCount: number): Track {
     customSampleSound: "hitnormal",
     customSampleIndex: 1,
     customSample: null,
+    regularNotes: [],
+    fxClips: [],
     hits: Array(noteCount).fill(false),
+  }
+}
+
+function createFxTrack(name: string): Track {
+  trackIdSeed += 1
+
+  return {
+    id: trackIdSeed,
+    channelType: "fx",
+    collapsed: false,
+    name,
+    sampleName: "FX one-shots",
+    sampleUrl: null,
+    sampleSource: "none",
+    customSampleBank: "normal",
+    customSampleSound: "hitnormal",
+    customSampleIndex: 1,
+    customSample: null,
+    regularNotes: [],
+    fxClips: [],
+    hits: Array(notes.value.length).fill(false),
   }
 }
 
@@ -517,6 +618,8 @@ function createTrackForSample(sampleName: string, hits: boolean[]): Track {
 
   return {
     id: trackIdSeed,
+    channelType: "regular",
+    collapsed: false,
     name: sampleName.replace(/\.wav$/i, ""),
     sampleName,
     sampleUrl: defaultSample?.url ?? null,
@@ -525,8 +628,113 @@ function createTrackForSample(sampleName: string, hits: boolean[]): Track {
     customSampleSound: parsedSample?.sound ?? "hitnormal",
     customSampleIndex: parsedSample?.sampleIndex ?? 1,
     customSample: null,
+    regularNotes: createRegularNotesFromHits(hits),
+    fxClips: [],
     hits,
   }
+}
+
+function createRegularNote(startMs: number, assignedNoteIndex: number | null): RegularNote {
+  regularNoteIdSeed += 1
+
+  return {
+    id: regularNoteIdSeed,
+    startMs,
+    assignedNoteIndex,
+  }
+}
+
+function createRegularNotesFromHits(hits: boolean[]) {
+  return hits.flatMap((enabled, noteIndex) => {
+    const note = notes.value[noteIndex]
+
+    if (!enabled || !note) {
+      return []
+    }
+
+    return [createRegularNote(noteDisplayTime(note), noteIndex)]
+  })
+}
+
+function syncRegularTrackHits(track: Track) {
+  track.hits = Array(notes.value.length).fill(false)
+
+  if (track.channelType !== "regular") {
+    return
+  }
+
+  for (const note of track.regularNotes) {
+    const assignedNote = note.assignedNoteIndex !== null ? notes.value[note.assignedNoteIndex] : null
+
+    if (assignedNote && canTrackAssignToNote(track, assignedNote)) {
+      track.hits[note.assignedNoteIndex] = true
+    }
+  }
+}
+
+function captureUndoSnapshot() {
+  undoStack.push({
+    tracks: tracks.value.map((track) => ({
+      trackId: track.id,
+      regularNotes: track.regularNotes.map((note) => ({ ...note })),
+      fxClips: track.fxClips.map((clip) => ({
+        id: clip.id,
+        startMs: clip.startMs,
+        durationMs: clip.durationMs,
+        assignedNoteIndex: clip.assignedNoteIndex,
+      })),
+    })),
+    selectedRegularNoteIds: [...selectedRegularNoteIds.value],
+    activeTrackIndex: activeTrackIndex.value,
+  })
+
+  if (undoStack.length > maxUndoSnapshots) {
+    undoStack.shift()
+  }
+}
+
+function undoLastEdit() {
+  const snapshot = undoStack.pop()
+
+  if (!snapshot) {
+    clipboardStatus.value = "Nothing to undo."
+    return
+  }
+
+  const snapshotsByTrack = new Map(snapshot.tracks.map((track) => [track.trackId, track]))
+
+  for (const track of tracks.value) {
+    const trackSnapshot = snapshotsByTrack.get(track.id)
+
+    if (!trackSnapshot) {
+      continue
+    }
+
+    if (track.channelType === "regular") {
+      track.regularNotes = trackSnapshot.regularNotes.map((note) => ({ ...note }))
+      syncRegularTrackHits(track)
+    }
+
+    if (track.channelType === "fx") {
+      const clipSnapshotsById = new Map(trackSnapshot.fxClips.map((clip) => [clip.id, clip]))
+
+      for (const clip of track.fxClips) {
+        const clipSnapshot = clipSnapshotsById.get(clip.id)
+
+        if (!clipSnapshot) {
+          continue
+        }
+
+        clip.startMs = clipSnapshot.startMs
+        clip.durationMs = clipSnapshot.durationMs
+        clip.assignedNoteIndex = clipSnapshot.assignedNoteIndex
+      }
+    }
+  }
+
+  selectedRegularNoteIds.value = new Set(snapshot.selectedRegularNoteIds)
+  activeTrackIndex.value = Math.min(snapshot.activeTrackIndex, Math.max(0, tracks.value.length - 1))
+  clipboardStatus.value = "Undid last edit."
 }
 
 async function handleOsuUpload(event: Event) {
@@ -555,6 +763,7 @@ async function handleOsuUpload(event: Event) {
         )
       : tracks.value.map((track) => ({
           ...track,
+          regularNotes: track.channelType === "regular" ? [] : track.regularNotes,
           hits: Array(parsed.notes.length).fill(false),
         }))
   currentTimeMs.value = playbackStartMs.value
@@ -747,7 +956,7 @@ function createHitsoundSlots(
   const slots: OsuNote[] = []
 
   for (const hitObject of hitObjects) {
-    slots.push(createSlot(hitObject, hitObject.kind, hitObject.timeMs))
+    slots.push(createSlot(hitObject, hitObject.kind, hitObject.timeMs, hitObject.kind === "slider" ? 0 : undefined))
 
     if (hitObject.kind !== "slider") {
       continue
@@ -763,8 +972,16 @@ function createHitsoundSlots(
       continue
     }
 
+    const slideCount = Math.max(1, Math.round(hitObject.slides) || 1)
+    const spanDurationMs = sliderDurationMs / slideCount
+
     slots.push(createSlot(hitObject, "slider-body", hitObject.timeMs + sliderDurationMs / 2))
-    slots.push(createSlot(hitObject, "slider-end", hitObject.timeMs + sliderDurationMs))
+
+    for (let edgeIndex = 1; edgeIndex <= slideCount; edgeIndex += 1) {
+      const edgeKind = edgeIndex === slideCount ? "slider-end" : "slider-repeat"
+
+      slots.push(createSlot(hitObject, edgeKind, hitObject.timeMs + spanDurationMs * edgeIndex, edgeIndex))
+    }
   }
 
   return slots
@@ -774,11 +991,13 @@ function createSlot(
   hitObject: RawHitObject,
   kind: HitSlotKind,
   timeMs: number,
+  edgeIndex?: number,
 ): OsuNote {
   return {
     id: `${hitObject.sourceIndex}-${kind}-${timeMs}`,
     index: 0,
     sourceIndex: hitObject.sourceIndex,
+    edgeIndex,
     x: hitObject.x,
     y: hitObject.y,
     timeMs,
@@ -962,9 +1181,10 @@ function buildImportedTrackHits(
       defaultSampleSetId,
     )
 
-    if (note.kind === "slider-end") {
-      const edgeSound = hitObject.edgeSounds.at(-1) ?? 0
-      const edgeSet = hitObject.edgeSets.at(-1) ?? { normalSet: 0, additionSet: 0 }
+    if (note.kind === "slider-end" || note.kind === "slider-repeat") {
+      const edgeIndex = note.edgeIndex ?? hitObject.edgeSounds.length - 1
+      const edgeSound = hitObject.edgeSounds[edgeIndex] ?? 0
+      const edgeSet = hitObject.edgeSets[edgeIndex] ?? { normalSet: 0, additionSet: 0 }
 
       addImportedLayerHits(
         importedTrackHits,
@@ -1109,6 +1329,10 @@ function revokeCustomSample(track: Track) {
   }
 }
 
+function revokeFxClip(clip: FxClip) {
+  URL.revokeObjectURL(clip.sampleUrl)
+}
+
 function fileToDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader()
@@ -1182,6 +1406,9 @@ async function deserializeCustomSample(sample: SavedCustomSample | null): Promis
 function revokeSessionObjectUrls() {
   for (const track of tracks.value) {
     revokeCustomSample(track)
+    for (const clip of track.fxClips) {
+      revokeFxClip(clip)
+    }
   }
 
   if (backingAudioUrl.value) {
@@ -1202,6 +1429,8 @@ function saveProject() {
     backingAudioDataUrl: backingAudioDataUrl.value,
     fallbackCustomSample: serializeCustomSample(fallbackCustomSample.value),
     tracks: tracks.value.map((track) => ({
+      channelType: track.channelType,
+      collapsed: track.collapsed,
       name: track.name,
       sampleName: track.sampleName,
       sampleSource: track.sampleSource,
@@ -1209,7 +1438,23 @@ function saveProject() {
       customSampleSound: track.customSampleSound,
       customSampleIndex: track.customSampleIndex,
       customSample: serializeCustomSample(track.customSample),
-      hits: [...track.hits],
+      regularNotes: track.regularNotes.map((note) => ({ ...note })),
+      fxClips: track.fxClips.map((clip) => ({
+        id: clip.id,
+        name: clip.name,
+        mimeType: clip.mimeType,
+        startMs: clip.startMs,
+        durationMs: clip.durationMs,
+        assignedNoteIndex: clip.assignedNoteIndex,
+        dataUrl: arrayBufferToDataUrl(clip.data, clip.mimeType),
+      })),
+      hits: Array.from({ length: notes.value.length }, (_, noteIndex) =>
+        track.regularNotes.some((note) => {
+          const assignedNote = notes.value[noteIndex]
+
+          return note.assignedNoteIndex === noteIndex && assignedNote && canTrackAssignToNote(track, assignedNote)
+        }),
+      ),
     })),
     activeTrackIndex: activeTrackIndex.value,
     currentTimeMs: currentTimeMs.value,
@@ -1258,6 +1503,33 @@ async function handleProjectLoad(event: Event) {
     trackIdSeed += 1
 
     const customSample = await deserializeCustomSample(savedTrack.customSample)
+    const restoredHits = Array.from({ length: parsed.notes.length }, (_, index) =>
+      Boolean(savedTrack.hits[index]),
+    )
+    const regularNotes = savedTrack.regularNotes
+      ? savedTrack.regularNotes.map((note) => {
+          regularNoteIdSeed = Math.max(regularNoteIdSeed, note.id)
+
+          return { ...note }
+        })
+      : createRegularNotesFromHits(restoredHits)
+    const fxClips: FxClip[] = []
+
+    for (const savedClip of savedTrack.fxClips ?? []) {
+      const data = await dataUrlToArrayBuffer(savedClip.dataUrl)
+      fxClipIdSeed = Math.max(fxClipIdSeed, savedClip.id)
+      fxClips.push({
+        id: savedClip.id,
+        name: savedClip.name,
+        sampleUrl: URL.createObjectURL(new Blob([data], { type: savedClip.mimeType })),
+        mimeType: savedClip.mimeType,
+        data,
+        startMs: savedClip.startMs,
+        durationMs: savedClip.durationMs,
+        assignedNoteIndex: savedClip.assignedNoteIndex,
+      })
+    }
+
     const defaultSample = defaultSamples.find((sample) => sample.name === savedTrack.sampleName)
     const sampleUrl =
       savedTrack.sampleSource === "custom" && customSample
@@ -1266,6 +1538,8 @@ async function handleProjectLoad(event: Event) {
 
     restoredTracks.push({
       id: trackIdSeed,
+      channelType: savedTrack.channelType ?? "regular",
+      collapsed: Boolean(savedTrack.collapsed),
       name: savedTrack.name,
       sampleName: savedTrack.sampleName,
       sampleUrl,
@@ -1274,7 +1548,9 @@ async function handleProjectLoad(event: Event) {
       customSampleSound: savedTrack.customSampleSound,
       customSampleIndex: savedTrack.customSampleIndex,
       customSample,
-      hits: Array.from({ length: parsed.notes.length }, (_, index) => Boolean(savedTrack.hits[index])),
+      regularNotes,
+      fxClips,
+      hits: restoredHits,
     })
   }
 
@@ -1319,24 +1595,53 @@ function selectDefaultSample(trackIndex: number, sampleUrl: string) {
   track.customSample = null
 }
 
-function handleDefaultSampleChange(event: Event, trackIndex: number) {
-  const select = event.target as HTMLSelectElement
-
-  selectDefaultSample(trackIndex, select.value)
-}
-
-function handleCustomSampleTypeChange(event: Event, trackIndex: number) {
+function selectDefaultHitsound(trackIndex: number, bank: SampleBank, sound: SampleSound) {
+  const sample = defaultSamples.find((defaultSample) => defaultSample.name === getSampleFileName(bank, sound, 1))
   const track = tracks.value[trackIndex]
-  const select = event.target as HTMLSelectElement
-  const option = sampleTypeOptions.find((sampleType) => sampleType.label === select.value)
 
-  if (!track || !option) {
+  if (!sample || !track) {
     return
   }
 
-  track.customSampleBank = option.bank
-  track.customSampleSound = option.sound
+  hsPickerModes.value[track.id] = "default"
+  selectDefaultSample(trackIndex, sample.url)
+}
+
+function selectCustomHitsoundType(trackIndex: number, bank: SampleBank, sound: SampleSound) {
+  const track = tracks.value[trackIndex]
+
+  if (!track) {
+    return
+  }
+
+  track.customSampleBank = bank
+  track.customSampleSound = sound
+  hsPickerModes.value[track.id] = "custom"
   refreshCustomSampleNaming(track)
+}
+
+function getHitsoundPickerMode(track: Track): HitsoundPickerMode {
+  return hsPickerModes.value[track.id] ?? (track.sampleSource === "custom" ? "custom" : "default")
+}
+
+function setHitsoundPickerMode(track: Track, mode: HitsoundPickerMode) {
+  hsPickerModes.value[track.id] = mode
+}
+
+function isHitsoundPickerOpen(track: Track) {
+  return hsPickerOpen.value[track.id] ?? false
+}
+
+function setHitsoundPickerOpen(event: Event, track: Track) {
+  hsPickerOpen.value[track.id] = (event.currentTarget as HTMLDetailsElement).open
+}
+
+function isDefaultHitsoundSelected(track: Track, bank: SampleBank, sound: SampleSound) {
+  return track.sampleSource === "default" && track.sampleName === getSampleFileName(bank, sound, 1)
+}
+
+function isCustomHitsoundTypeSelected(track: Track, bank: SampleBank, sound: SampleSound) {
+  return track.customSampleBank === bank && track.customSampleSound === sound
 }
 
 function getSampleFileName(bank: SampleBank, sound: SampleSound, sampleIndex: number) {
@@ -1438,6 +1743,7 @@ async function handleSampleUpload(event: Event, trackIndex: number) {
   track.sampleUrl = URL.createObjectURL(file)
   track.sampleName = fileName
   track.sampleSource = "custom"
+  hsPickerModes.value[track.id] = "custom"
   track.customSampleIndex = sampleIndex
   track.customSample = {
     bank: track.customSampleBank,
@@ -1449,6 +1755,395 @@ async function handleSampleUpload(event: Event, trackIndex: number) {
     data,
   }
   input.value = ""
+}
+
+async function handleFxClipUpload(event: Event, trackIndex: number) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  const track = tracks.value[trackIndex]
+
+  if (!file || !track || track.channelType !== "fx") {
+    return
+  }
+
+  const sampleUrl = URL.createObjectURL(file)
+  const data = await file.arrayBuffer()
+  const clip: FxClip = {
+    id: ++fxClipIdSeed,
+    name: file.name,
+    sampleUrl,
+    mimeType: file.type || "audio/wav",
+    data,
+    startMs: playbackAnchorMs.value,
+    durationMs: 1_000,
+    assignedNoteIndex: null,
+  }
+
+  track.fxClips.push(clip)
+  input.value = ""
+
+  const audio = new Audio(sampleUrl)
+
+  audio.addEventListener(
+    "loadedmetadata",
+    () => {
+      if (Number.isFinite(audio.duration) && audio.duration > 0) {
+        clip.durationMs = audio.duration * 1_000
+      }
+    },
+    { once: true },
+  )
+}
+
+function fxClipStyle(clip: FxClip) {
+  const left = timeToPixel(clip.startMs)
+  const width = Math.max(28, (clip.durationMs / 1_000) * pixelsPerSecond.value)
+
+  return {
+    left: `${left}px`,
+    width: `${width}px`,
+  }
+}
+
+function startFxClipDrag(event: PointerEvent, trackIndex: number, clip: FxClip) {
+  if (event.button !== 0) {
+    return
+  }
+
+  captureUndoSnapshot()
+  fxClipDrag = {
+    trackIndex,
+    clipId: clip.id,
+    startClientX: event.clientX,
+    startMs: clip.startMs,
+  }
+  suppressNextTimelineClick.value = true
+  event.preventDefault()
+  event.stopPropagation()
+}
+
+function updateFxClipDrag(event: PointerEvent) {
+  if (!fxClipDrag) {
+    return
+  }
+
+  const track = tracks.value[fxClipDrag.trackIndex]
+  const clip = track?.fxClips.find((candidate) => candidate.id === fxClipDrag?.clipId)
+
+  if (!clip) {
+    return
+  }
+
+  const deltaMs = ((event.clientX - fxClipDrag.startClientX) / pixelsPerSecond.value) * 1_000
+
+  clip.startMs = Math.min(Math.max(timelineStartMs.value, fxClipDrag.startMs + deltaMs), durationMs.value)
+  event.preventDefault()
+}
+
+function finishFxClipDrag() {
+  fxClipDrag = null
+}
+
+function assignFxClipToNearestSlot(clip: FxClip) {
+  const nearestTime = findNearestNoteTime(clip.startMs)
+  const noteIndex = findNoteIndexAtTime(nearestTime)
+
+  if (noteIndex === -1) {
+    return
+  }
+
+  captureUndoSnapshot()
+  clip.startMs = nearestTime
+  clip.assignedNoteIndex = noteIndex
+}
+
+function getRegularNoteKey(track: Track, note: RegularNote) {
+  return `${track.id}:${note.id}`
+}
+
+function visibleRegularNotes(track: Track) {
+  return track.regularNotes.filter(
+    (note) => note.startMs >= visibleRangeStartMs.value && note.startMs <= visibleRangeEndMs.value,
+  )
+}
+
+function regularNoteStyle(note: RegularNote) {
+  const width = markerDiameter
+
+  return {
+    left: `${timeToPixel(note.startMs) - width / 2}px`,
+    width: `${width}px`,
+  }
+}
+
+function getTrackSampleSound(track: Track) {
+  if (track.sampleSource === "custom" && track.customSample) {
+    return track.customSample.sound
+  }
+
+  return parseSampleName(track.sampleName)?.sound ?? track.customSampleSound
+}
+
+function canTrackAssignToNote(track: Track, note: OsuNote) {
+  return note.kind !== "slider-body" || getTrackSampleSound(track) === "sliderwhistle"
+}
+
+function getGuideCandidatesForTrack(track?: Track) {
+  if (track?.channelType === "regular" && getTrackSampleSound(track) === "sliderwhistle") {
+    return sliderWhistleGuideSlots.value
+  }
+
+  return markerSlots.value
+}
+
+function getNearestSortedGuideNote(timeMs: number, candidates: OsuNote[]) {
+  if (!candidates.length) {
+    return {
+      nearestNote: null,
+      nearestDistance: Number.POSITIVE_INFINITY,
+    }
+  }
+
+  let low = 0
+  let high = candidates.length - 1
+
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2)
+
+    if (noteDisplayTime(candidates[mid]) < timeMs) {
+      low = mid + 1
+    } else {
+      high = mid
+    }
+  }
+
+  const right = candidates[low]
+  const left = candidates[Math.max(0, low - 1)]
+  const rightDistance = right ? Math.abs(noteDisplayTime(right) - timeMs) : Number.POSITIVE_INFINITY
+  const leftDistance = left ? Math.abs(noteDisplayTime(left) - timeMs) : Number.POSITIVE_INFINITY
+
+  return leftDistance <= rightDistance
+    ? { nearestNote: left, nearestDistance: leftDistance }
+    : { nearestNote: right, nearestDistance: rightDistance }
+}
+
+function getNearestGuideNote(timeMs: number, track?: Track) {
+  return getNearestSortedGuideNote(timeMs, getGuideCandidatesForTrack(track))
+}
+
+function snapRegularTime(timeMs: number, track?: Track, force = false) {
+  const clampedTimeMs = Math.min(Math.max(timelineStartMs.value, timeMs), durationMs.value)
+  const { nearestNote, nearestDistance } = getNearestGuideNote(clampedTimeMs, track)
+  const thresholdMs = (guideSnapThresholdPx / pixelsPerSecond.value) * 1_000
+
+  if (nearestNote && (force || nearestDistance <= thresholdMs)) {
+    return {
+      timeMs: noteDisplayTime(nearestNote),
+      assignedNoteIndex: nearestNote.index,
+    }
+  }
+
+  return {
+    timeMs: clampedTimeMs,
+    assignedNoteIndex: null,
+  }
+}
+
+function getRegularAssignmentAtTime(timeMs: number, track: Track) {
+  const { nearestNote, nearestDistance } = getNearestGuideNote(timeMs, track)
+  const thresholdMs = (guideSnapThresholdPx / pixelsPerSecond.value) * 1_000
+
+  return nearestNote && nearestDistance <= thresholdMs ? nearestNote.index : null
+}
+
+function getRegularNoteRefsForDrag(track: Track, trackIndex: number, note: RegularNote) {
+  const noteKey = getRegularNoteKey(track, note)
+
+  if (!selectedRegularNoteIds.value.has(noteKey)) {
+    selectedRegularNoteIds.value = new Set([noteKey])
+
+    return [{ trackIndex, noteId: note.id, startMs: note.startMs }]
+  }
+
+  return getSelectedRegularNoteRefs().map(({ trackIndex: selectedTrackIndex, note: selectedNote }) => ({
+    trackIndex: selectedTrackIndex,
+    noteId: selectedNote.id,
+    startMs: selectedNote.startMs,
+  }))
+}
+
+function addRegularNoteAtEvent(event: MouseEvent, trackIndex: number) {
+  const target = event.target as HTMLElement | null
+  const track = tracks.value[trackIndex]
+
+  if (!track || track.channelType !== "regular" || track.collapsed) {
+    return
+  }
+
+  if (target?.closest("button, input, select, label, audio, .lane-label, .placed-note")) {
+    return
+  }
+
+  const snappedTime = snapRegularTime(getTimelineTimeFromClientX(event.clientX), track)
+
+  captureUndoSnapshot()
+  setActiveTrack(trackIndex)
+  track.regularNotes.push(createRegularNote(snappedTime.timeMs, snappedTime.assignedNoteIndex))
+  syncRegularTrackHits(track)
+  suppressNextTimelineClick.value = true
+  event.preventDefault()
+}
+
+function removeRegularNote(trackIndex: number, regularNoteId: number) {
+  const track = tracks.value[trackIndex]
+
+  if (!track || track.channelType !== "regular") {
+    return
+  }
+
+  captureUndoSnapshot()
+  track.regularNotes = track.regularNotes.filter((note) => note.id !== regularNoteId)
+  syncRegularTrackHits(track)
+  selectedRegularNoteIds.value.delete(`${track.id}:${regularNoteId}`)
+  selectedRegularNoteIds.value = new Set(selectedRegularNoteIds.value)
+}
+
+function snapAllSounds() {
+  let snappedCount = 0
+
+  captureUndoSnapshot()
+
+  for (const track of tracks.value) {
+    if (track.channelType === "regular") {
+      for (const note of track.regularNotes) {
+        const snappedTime = snapRegularTime(note.startMs, track, true)
+
+        note.startMs = snappedTime.timeMs
+        note.assignedNoteIndex = snappedTime.assignedNoteIndex
+        snappedCount += 1
+      }
+
+      syncRegularTrackHits(track)
+      continue
+    }
+
+    for (const clip of track.fxClips) {
+      const nearestTime = findNearestNoteTime(clip.startMs)
+      const noteIndex = findNoteIndexAtTime(nearestTime)
+
+      if (noteIndex === -1) {
+        continue
+      }
+
+      clip.startMs = nearestTime
+      clip.assignedNoteIndex = noteIndex
+      snappedCount += 1
+    }
+  }
+
+  clipboardStatus.value = `Snapped ${snappedCount} sounds to the nearest tick.`
+}
+
+function startRegularNoteDrag(event: PointerEvent, trackIndex: number, note: RegularNote) {
+  if (event.button !== 0) {
+    return
+  }
+
+  const track = tracks.value[trackIndex]
+
+  if (!track || track.channelType !== "regular") {
+    return
+  }
+
+  captureUndoSnapshot()
+  regularNoteDrag = {
+    trackIndex,
+    noteId: note.id,
+    startClientX: event.clientX,
+    startMs: note.startMs,
+    notes: getRegularNoteRefsForDrag(track, trackIndex, note),
+  }
+  suppressNextTimelineClick.value = true
+  setActiveTrack(trackIndex)
+  event.preventDefault()
+  event.stopPropagation()
+}
+
+function updateRegularNoteDrag(event: PointerEvent) {
+  if (!regularNoteDrag) {
+    return
+  }
+
+  const track = tracks.value[regularNoteDrag.trackIndex]
+
+  if (!track || track.channelType !== "regular") {
+    return
+  }
+
+  const deltaMs = ((event.clientX - regularNoteDrag.startClientX) / pixelsPerSecond.value) * 1_000
+  const anchorTarget = snapRegularTime(regularNoteDrag.startMs + deltaMs, track)
+  const rawDragDeltaMs = anchorTarget.timeMs - regularNoteDrag.startMs
+  const minStartMs = Math.min(...regularNoteDrag.notes.map((note) => note.startMs))
+  const maxStartMs = Math.max(...regularNoteDrag.notes.map((note) => note.startMs))
+  const clampedDragDeltaMs = Math.min(
+    Math.max(rawDragDeltaMs, timelineStartMs.value - minStartMs),
+    durationMs.value - maxStartMs,
+  )
+  const affectedTrackIndices = new Set<number>()
+
+  for (const draggedNote of regularNoteDrag.notes) {
+    const draggedTrack = tracks.value[draggedNote.trackIndex]
+
+    if (!draggedTrack || draggedTrack.channelType !== "regular") {
+      continue
+    }
+
+    const note = draggedTrack.regularNotes.find((candidate) => candidate.id === draggedNote.noteId)
+
+    if (!note) {
+      continue
+    }
+
+    note.startMs = draggedNote.startMs + clampedDragDeltaMs
+    note.assignedNoteIndex = getRegularAssignmentAtTime(note.startMs, draggedTrack)
+    affectedTrackIndices.add(draggedNote.trackIndex)
+  }
+
+  for (const trackIndex of affectedTrackIndices) {
+    const affectedTrack = tracks.value[trackIndex]
+
+    if (affectedTrack) {
+      syncRegularTrackHits(affectedTrack)
+    }
+  }
+
+  event.preventDefault()
+}
+
+function finishRegularNoteDrag() {
+  regularNoteDrag = null
+}
+
+function removeFxClip(trackIndex: number, clipId: number) {
+  const track = tracks.value[trackIndex]
+
+  if (!track) {
+    return
+  }
+
+  const clipIndex = track.fxClips.findIndex((clip) => clip.id === clipId)
+
+  if (clipIndex === -1) {
+    return
+  }
+
+  const [clip] = track.fxClips.splice(clipIndex, 1)
+
+  if (clip) {
+    revokeFxClip(clip)
+    fxPlayers.get(clip.id)?.dispose()
+    fxPlayers.delete(clip.id)
+  }
 }
 
 async function handleBackingUpload(event: Event) {
@@ -1484,8 +2179,13 @@ function handleBackingMetadata() {
   }
 }
 
-function addTrack() {
-  tracks.value.push(createTrack(`Track ${tracks.value.length + 1}`, notes.value.length))
+function addRegularChannel() {
+  tracks.value.push(createTrack(`HS ${tracks.value.length + 1}`, notes.value.length))
+  activeTrackIndex.value = tracks.value.length - 1
+}
+
+function addFxChannel() {
+  tracks.value.push(createFxTrack(`FX ${tracks.value.length + 1}`))
   activeTrackIndex.value = tracks.value.length - 1
 }
 
@@ -1497,11 +2197,26 @@ function removeTrack(trackIndex: number) {
   }
 
   revokeCustomSample(track)
+  for (const clip of track.fxClips) {
+    revokeFxClip(clip)
+    fxPlayers.get(clip.id)?.dispose()
+    fxPlayers.delete(clip.id)
+  }
 
   players.get(track.id)?.dispose()
   players.delete(track.id)
+  delete hsPickerModes.value[track.id]
+  delete hsPickerOpen.value[track.id]
 
-  activeTrackIndex.value = Math.min(activeTrackIndex.value, Math.max(0, tracks.value.length - 1))
+  selectedRegularNoteIds.value = new Set(
+    [...selectedRegularNoteIds.value].filter((noteKey) => !noteKey.startsWith(`${track.id}:`)),
+  )
+
+  if (activeTrackIndex.value > trackIndex) {
+    activeTrackIndex.value -= 1
+  } else if (activeTrackIndex.value >= tracks.value.length) {
+    activeTrackIndex.value = Math.max(0, tracks.value.length - 1)
+  }
 
   if (selectionTrackIndex.value === trackIndex) {
     selectionTrackIndex.value = null
@@ -1510,6 +2225,24 @@ function removeTrack(trackIndex: number) {
   } else if (selectionTrackIndex.value !== null && selectionTrackIndex.value > trackIndex) {
     selectionTrackIndex.value -= 1
   }
+
+  if (selectionAnchorTrackIndex.value !== null && selectionAnchorTrackIndex.value > trackIndex) {
+    selectionAnchorTrackIndex.value -= 1
+  }
+
+  if (selectionFocusTrackIndex.value !== null && selectionFocusTrackIndex.value > trackIndex) {
+    selectionFocusTrackIndex.value -= 1
+  }
+}
+
+function toggleTrackCollapsed(trackIndex: number) {
+  const track = tracks.value[trackIndex]
+
+  if (!track) {
+    return
+  }
+
+  track.collapsed = !track.collapsed
 }
 
 function clearTrack(trackIndex: number) {
@@ -1519,7 +2252,23 @@ function clearTrack(trackIndex: number) {
     return
   }
 
+  if (track.channelType === "fx") {
+    for (const clip of track.fxClips) {
+      revokeFxClip(clip)
+      fxPlayers.get(clip.id)?.dispose()
+      fxPlayers.delete(clip.id)
+    }
+
+    track.fxClips = []
+    return
+  }
+
+  captureUndoSnapshot()
+  track.regularNotes = []
   track.hits = Array(notes.value.length).fill(false)
+  selectedRegularNoteIds.value = new Set(
+    [...selectedRegularNoteIds.value].filter((noteKey) => !noteKey.startsWith(`${track.id}:`)),
+  )
 }
 
 function getExportSampleForTrack(track: Track, trackIndex: number): ExportSample | null {
@@ -1572,7 +2321,18 @@ function getSelectedHitsoundLayer(noteIndex: number, fallbackNormal: ExportSampl
   // picks the highest normal layer, and additions share the highest addition
   // set/index while OR-ing together their clap/finish/whistle bits.
   tracks.value.forEach((track, trackIndex) => {
-    if (!track.hits[noteIndex]) {
+    if (
+      track.channelType !== "regular" ||
+      !track.regularNotes.some((regularNote) => {
+        const assignedNote = notes.value[noteIndex]
+
+        return (
+          regularNote.assignedNoteIndex === noteIndex &&
+          assignedNote &&
+          canTrackAssignToNote(track, assignedNote)
+        )
+      })
+    ) {
       return
     }
 
@@ -1594,13 +2354,15 @@ function getSelectedHitsoundLayer(noteIndex: number, fallbackNormal: ExportSampl
 function buildSourceHitsoundAssignments() {
   const assignments = new Map<number, SourceHitsoundAssignment>()
   const fallbackSample = getFallbackExportSample()
-  const sourceSlots = new Map<number, { hasHead: boolean, hasSliderEnd: boolean }>()
+  const sourceSlots = new Map<number, { hasHead: boolean, edgeIndices: Set<number> }>()
 
   for (const note of notes.value) {
-    const slots = sourceSlots.get(note.sourceIndex) ?? { hasHead: false, hasSliderEnd: false }
+    const slots = sourceSlots.get(note.sourceIndex) ?? { hasHead: false, edgeIndices: new Set<number>() }
 
-    if (note.kind === "slider-end") {
-      slots.hasSliderEnd = true
+    if (note.kind === "slider-end" || note.kind === "slider-repeat") {
+      if (note.edgeIndex !== undefined) {
+        slots.edgeIndices.add(note.edgeIndex)
+      }
     } else if (note.kind !== "slider-body") {
       slots.hasHead = true
     }
@@ -1615,8 +2377,11 @@ function buildSourceHitsoundAssignments() {
 
     const assignment = assignments.get(note.sourceIndex) ?? {}
 
-    if (note.kind === "slider-end") {
-      assignment.sliderEnd = hitsoundLayer
+    if (note.kind === "slider-end" || note.kind === "slider-repeat") {
+      if (note.edgeIndex !== undefined) {
+        assignment.sliderEdges = assignment.sliderEdges ?? new Map<number, HitsoundLayer>()
+        assignment.sliderEdges.set(note.edgeIndex, hitsoundLayer)
+      }
     } else if (note.kind === "slider-body") {
       assignment.sliderBody = hitsoundLayer
     } else {
@@ -1636,10 +2401,14 @@ function buildSourceHitsoundAssignments() {
       }
     }
 
-    if (slots.hasSliderEnd && !assignment.sliderEnd) {
-      assignment.sliderEnd = {
-        normal: fallbackSample,
-        hitSoundBits: 0,
+    for (const edgeIndex of slots.edgeIndices) {
+      assignment.sliderEdges = assignment.sliderEdges ?? new Map<number, HitsoundLayer>()
+
+      if (!assignment.sliderEdges.has(edgeIndex)) {
+        assignment.sliderEdges.set(edgeIndex, {
+          normal: fallbackSample,
+          hitSoundBits: 0,
+        })
       }
     }
 
@@ -1814,13 +2583,13 @@ function formatEdgeSet(layer: HitsoundLayer) {
 function applySliderEdgeHitsound(
   parts: string[],
   layer: HitsoundLayer,
-  edge: "head" | "end",
+  edgeIndex: number,
 ) {
   const { edgeSounds, edgeSets } = normalizeSliderEdgeParts(parts)
-  const edgeIndex = edge === "head" ? 0 : edgeSounds.length - 1
+  const clampedEdgeIndex = Math.min(Math.max(0, edgeIndex), edgeSounds.length - 1)
 
-  edgeSounds[edgeIndex] = String(layer.hitSoundBits)
-  edgeSets[edgeIndex] = formatEdgeSet(layer)
+  edgeSounds[clampedEdgeIndex] = String(layer.hitSoundBits)
+  edgeSets[clampedEdgeIndex] = formatEdgeSet(layer)
   parts[8] = edgeSounds.join("|")
   parts[9] = edgeSets.join("|")
   parts[10] = applyLayerToHitSample(parts[10], layer)
@@ -1865,11 +2634,11 @@ function rewriteHitObjectLine(line: string, assignment: SourceHitsoundAssignment
 
     if (sliderHeadLayer) {
       applyHeadHitsound(parts, kind, sliderHeadLayer)
-      applySliderEdgeHitsound(parts, sliderHeadLayer, "head")
+      applySliderEdgeHitsound(parts, sliderHeadLayer, 0)
     }
 
-    if (assignment.sliderEnd) {
-      applySliderEdgeHitsound(parts, assignment.sliderEnd, "end")
+    for (const [edgeIndex, edgeLayer] of assignment.sliderEdges ?? []) {
+      applySliderEdgeHitsound(parts, edgeLayer, edgeIndex)
     }
   } else if (assignment.head) {
     applyHeadHitsound(parts, kind, assignment.head)
@@ -1911,7 +2680,10 @@ function getUsedExportSamples() {
   }
 
   tracks.value.forEach((track, trackIndex) => {
-    if (!track.hits.some(Boolean)) {
+    if (
+      track.channelType !== "regular" ||
+      !track.regularNotes.some((regularNote) => regularNote.assignedNoteIndex !== null)
+    ) {
       return
     }
 
@@ -1964,17 +2736,6 @@ async function downloadHitsoundedOsu() {
   URL.revokeObjectURL(url)
 }
 
-function toggleHit(trackIndex: number, noteIndex: number) {
-  const track = tracks.value[trackIndex]
-
-  if (!track) {
-    return
-  }
-
-  activeTrackIndex.value = trackIndex
-  track.hits[noteIndex] = !track.hits[noteIndex]
-}
-
 function setActiveTrack(trackIndex: number) {
   if (!tracks.value[trackIndex]) {
     return
@@ -1988,66 +2749,148 @@ function noteDisplayTime(note: OsuNote) {
 }
 
 function findNearestNoteTime(timeMs: number) {
-  let nearestTime = timeMs
-  let nearestDistance = Number.POSITIVE_INFINITY
+  const nearestNote = getNearestSortedGuideNote(timeMs, markerSlots.value).nearestNote
 
-  for (const note of notes.value) {
-    const candidateTime = noteDisplayTime(note)
-    const distance = Math.abs(candidateTime - timeMs)
-
-    if (distance < nearestDistance) {
-      nearestDistance = distance
-      nearestTime = candidateTime
-    }
-  }
-
-  return nearestTime
+  return nearestNote ? noteDisplayTime(nearestNote) : timeMs
 }
 
 function findNoteIndexAtTime(timeMs: number) {
-  let nearestIndex = -1
-  let nearestDistance = Number.POSITIVE_INFINITY
+  const { nearestNote, nearestDistance } = getNearestSortedGuideNote(timeMs, markerSlots.value)
   const toleranceMs = 3
 
-  for (const note of notes.value) {
-    const distance = Math.abs(noteDisplayTime(note) - timeMs)
-
-    if (distance < nearestDistance) {
-      nearestDistance = distance
-      nearestIndex = note.index
-    }
-  }
-
-  return nearestDistance <= toleranceMs ? nearestIndex : -1
+  return nearestNote && nearestDistance <= toleranceMs ? nearestNote.index : -1
 }
 
-function selectionRangeStyle() {
+function selectionMarqueeStyle() {
   const startX = timeToPixel(selectionStartMs.value)
   const endX = timeToPixel(selectionEndMs.value)
+  const startTop = getTrackTop(selectionStartTrackIndex.value)
+  const endBottom = getTrackTop(selectionEndTrackIndex.value) + getTrackLaneHeight(selectionEndTrackIndex.value)
 
   return {
     left: `${startX}px`,
     width: `${Math.max(1, endX - startX)}px`,
+    top: `${timelineHeaderHeight + startTop}px`,
+    height: `${Math.max(1, endBottom - startTop)}px`,
   }
+}
+
+function getTrackLaneHeight(trackIndex: number) {
+  const track = tracks.value[trackIndex]
+
+  if (!track) {
+    return closedTrackLaneHeight
+  }
+
+  if (track.collapsed) {
+    return collapsedTrackLaneHeight
+  }
+
+  if (track.channelType === "fx") {
+    return fxTrackLaneHeight
+  }
+
+  if (!isHitsoundPickerOpen(track)) {
+    return closedTrackLaneHeight
+  }
+
+  return getHitsoundPickerMode(track) === "custom" ? customPickerTrackLaneHeight : defaultPickerTrackLaneHeight
+}
+
+function getTrackTop(trackIndex: number) {
+  let top = 0
+
+  for (let index = 0; index < trackIndex; index += 1) {
+    top += getTrackLaneHeight(index)
+  }
+
+  return top
+}
+
+function getTrackIndexFromClientY(clientY: number) {
+  const scroller = timelineScroll.value
+
+  if (!scroller) {
+    return activeTrackIndex.value
+  }
+
+  const rect = scroller.getBoundingClientRect()
+  const yInContent = clientY - rect.top + scroller.scrollTop - timelineHeaderHeight
+  let accumulatedTop = 0
+
+  for (const [trackIndex] of tracks.value.entries()) {
+    accumulatedTop += getTrackLaneHeight(trackIndex)
+
+    if (yInContent < accumulatedTop) {
+      return trackIndex
+    }
+  }
+
+  return Math.max(0, tracks.value.length - 1)
+}
+
+function getSelectedRegularNoteRefs() {
+  const selectedIds = selectedRegularNoteIds.value
+  const refs: Array<{ track: Track, trackIndex: number, note: RegularNote }> = []
+
+  tracks.value.forEach((track, trackIndex) => {
+    if (track.channelType !== "regular") {
+      return
+    }
+
+    for (const note of track.regularNotes) {
+      if (selectedIds.has(getRegularNoteKey(track, note))) {
+        refs.push({ track, trackIndex, note })
+      }
+    }
+  })
+
+  return refs
+}
+
+function setSelectedRegularNotesFromMarquee() {
+  const nextSelection = new Set<string>()
+
+  for (let trackIndex = selectionStartTrackIndex.value; trackIndex <= selectionEndTrackIndex.value; trackIndex += 1) {
+    const track = tracks.value[trackIndex]
+
+    if (!track || track.channelType !== "regular") {
+      continue
+    }
+
+    for (const note of track.regularNotes) {
+      if (note.startMs >= selectionStartMs.value && note.startMs <= selectionEndMs.value) {
+        nextSelection.add(getRegularNoteKey(track, note))
+      }
+    }
+  }
+
+  selectedRegularNoteIds.value = nextSelection
 }
 
 function startRangeSelection(event: PointerEvent, trackIndex: number) {
   const target = event.target as HTMLElement | null
+  const track = tracks.value[trackIndex]
 
   if (event.button !== 0) {
     return
   }
 
-  if (target?.closest("button, input, label, audio, .lane-label")) {
+  if (!track || track.channelType === "fx" || track.collapsed) {
     return
   }
 
-  const timeMs = findNearestNoteTime(getTimelineTimeFromClientX(event.clientX))
+  if (target?.closest("button, input, select, label, audio, .lane-label, .placed-note")) {
+    return
+  }
 
   setActiveTrack(trackIndex)
+  selectedRegularNoteIds.value = new Set()
   selectionTrackIndex.value = trackIndex
-  selectionAnchorMs.value = timeMs
-  selectionFocusMs.value = timeMs
+  selectionAnchorMs.value = getTimelineTimeFromClientX(event.clientX)
+  selectionFocusMs.value = selectionAnchorMs.value
+  selectionAnchorTrackIndex.value = trackIndex
+  selectionFocusTrackIndex.value = trackIndex
   isSelectingRange.value = true
   suppressNextTimelineClick.value = true
   event.preventDefault()
@@ -2058,7 +2901,8 @@ function updateRangeSelection(event: PointerEvent) {
     return
   }
 
-  selectionFocusMs.value = findNearestNoteTime(getTimelineTimeFromClientX(event.clientX))
+  selectionFocusMs.value = getTimelineTimeFromClientX(event.clientX)
+  selectionFocusTrackIndex.value = getTrackIndexFromClientY(event.clientY)
 }
 
 function finishRangeSelection() {
@@ -2072,170 +2916,144 @@ function finishRangeSelection() {
     selectionTrackIndex.value = null
     selectionAnchorMs.value = null
     selectionFocusMs.value = null
+    selectionAnchorTrackIndex.value = null
+    selectionFocusTrackIndex.value = null
     suppressNextTimelineClick.value = false
     clipboardStatus.value = ""
     return
   }
 
-  clipboardStatus.value = hasSelection.value
-    ? `Selected ${formatTime(selectionStartMs.value)}-${formatTime(selectionEndMs.value)} on ${
-        tracks.value[selectionTrackIndex.value ?? 0]?.name ?? "track"
-      }.`
-    : ""
-
-  if (hasSelection.value) {
-    shortcutSelectionScope.value = null
-  }
-}
-
-function clearSelection() {
+  setSelectedRegularNotesFromMarquee()
   selectionTrackIndex.value = null
   selectionAnchorMs.value = null
   selectionFocusMs.value = null
+  selectionAnchorTrackIndex.value = null
+  selectionFocusTrackIndex.value = null
+  clipboardStatus.value = selectedRegularNoteIds.value.size
+    ? `Selected ${selectedRegularNoteIds.value.size} notes.`
+    : "No notes selected."
+}
+
+function clearSelection() {
+  selectedRegularNoteIds.value = new Set()
+  selectionTrackIndex.value = null
+  selectionAnchorMs.value = null
+  selectionFocusMs.value = null
+  selectionAnchorTrackIndex.value = null
+  selectionFocusTrackIndex.value = null
   isSelectingRange.value = false
   suppressNextTimelineClick.value = false
-  shortcutSelectionScope.value = null
   clipboardStatus.value = "Selection cleared."
 }
 
 function copySelection() {
-  if (!hasSelection.value || selectionTrackIndex.value === null) {
-    clipboardStatus.value = "Drag across a track lane to select a pattern first."
+  const selectedNotes = getSelectedRegularNoteRefs()
+
+  if (!selectedNotes.length) {
+    clipboardStatus.value = "Drag a marquee around notes to select a pattern first."
     return
   }
 
-  const sourceTrack = tracks.value[selectionTrackIndex.value]
-
-  if (!sourceTrack) {
-    return
-  }
+  const firstTimeMs = Math.min(...selectedNotes.map(({ note }) => note.startMs))
+  const lastTimeMs = Math.max(...selectedNotes.map(({ note }) => note.startMs))
+  const firstTrackIndex = Math.min(...selectedNotes.map(({ trackIndex }) => trackIndex))
+  const selectedTrackCount = new Set(selectedNotes.map(({ trackIndex }) => trackIndex)).size
 
   copiedPattern.value = {
-    sourceTrackName: sourceTrack.name,
-    durationMs: selectionDurationMs.value,
-    hits: notes.value
-      .filter((note) => {
-        const timeMs = noteDisplayTime(note)
-
-        return (
-          timeMs >= selectionStartMs.value &&
-          timeMs <= selectionEndMs.value &&
-          sourceTrack.hits[note.index]
-        )
-      })
-      .map((note) => ({
-        offsetMs: noteDisplayTime(note) - selectionStartMs.value,
-      })),
+    sourceTrackName: `${selectedTrackCount} channel${selectedTrackCount === 1 ? "" : "s"}`,
+    durationMs: Math.max(0, lastTimeMs - firstTimeMs),
+    hits: selectedNotes.map(({ trackIndex, note }) => ({
+      offsetMs: note.startMs - firstTimeMs,
+      trackOffset: trackIndex - firstTrackIndex,
+    })),
   }
-  clipboardStatus.value = `Copied ${copiedPattern.value.hits.length} hits from ${sourceTrack.name}.`
+  clipboardStatus.value = `Copied ${copiedPattern.value.hits.length} notes from ${copiedPattern.value.sourceTrackName}.`
 }
 
 function pasteSelection() {
   const pattern = copiedPattern.value
-  const targetTrack = tracks.value[activeTrackIndex.value]
 
-  if (!pattern || !targetTrack) {
+  if (!pattern) {
     clipboardStatus.value = "Copy a selected pattern before pasting."
     return
   }
 
-  const pasteStartMs = findNearestNoteTime(currentTimeMs.value)
+  captureUndoSnapshot()
+  const activeTrack = tracks.value[activeTrackIndex.value]
+  const pasteStart = snapRegularTime(
+    currentTimeMs.value,
+    activeTrack?.channelType === "regular" ? activeTrack : undefined,
+  )
+  const pasteStartMs = pasteStart.timeMs
   const pasteEndMs = pasteStartMs + pattern.durationMs
+  const targetTrackIndices = new Set(
+    pattern.hits
+      .map((copiedHit) => activeTrackIndex.value + copiedHit.trackOffset)
+      .filter((trackIndex) => tracks.value[trackIndex]?.channelType === "regular"),
+  )
 
-  for (const note of notes.value) {
-    const timeMs = noteDisplayTime(note)
+  for (const trackIndex of targetTrackIndices) {
+    const track = tracks.value[trackIndex]
 
-    if (timeMs >= pasteStartMs && timeMs <= pasteEndMs) {
-      targetTrack.hits[note.index] = false
+    if (!track) {
+      continue
     }
+
+    track.regularNotes = track.regularNotes.filter((note) => note.startMs < pasteStartMs || note.startMs > pasteEndMs)
   }
 
   let pastedCount = 0
 
   for (const copiedHit of pattern.hits) {
-    const targetIndex = findNoteIndexAtTime(pasteStartMs + copiedHit.offsetMs)
+    const targetTrack = tracks.value[activeTrackIndex.value + copiedHit.trackOffset]
 
-    if (targetIndex === -1) {
+    if (!targetTrack || targetTrack.channelType !== "regular") {
       continue
     }
 
-    targetTrack.hits[targetIndex] = true
+    const snappedTime = snapRegularTime(pasteStartMs + copiedHit.offsetMs, targetTrack)
+
+    targetTrack.regularNotes.push(createRegularNote(snappedTime.timeMs, snappedTime.assignedNoteIndex))
     pastedCount += 1
   }
 
-  clipboardStatus.value = `Pasted ${pastedCount} hits to ${targetTrack.name} at ${formatTime(pasteStartMs)}.`
+  for (const trackIndex of targetTrackIndices) {
+    const track = tracks.value[trackIndex]
+
+    if (track) {
+      syncRegularTrackHits(track)
+    }
+  }
+
+  clearSelection()
+  clipboardStatus.value = `Pasted ${pastedCount} notes starting at ${formatTime(pasteStartMs)}.`
 }
 
 function clearSelectedRegion() {
-  if (!hasSelection.value || selectionTrackIndex.value === null) {
-    if (shortcutSelectionScope.value === "all-tracks") {
-      let clearedCount = 0
+  const selectedIds = selectedRegularNoteIds.value
 
-      for (const trackItem of tracks.value) {
-        for (let noteIndex = 0; noteIndex < trackItem.hits.length; noteIndex += 1) {
-          if (!trackItem.hits[noteIndex]) {
-            continue
-          }
-
-          trackItem.hits[noteIndex] = false
-          clearedCount += 1
-        }
-      }
-
-      shortcutSelectionScope.value = null
-      clipboardStatus.value = `Cleared ${clearedCount} hits across all tracks.`
-      return
-    }
-
-    if (shortcutSelectionScope.value === "active-track") {
-      const activeTrack = tracks.value[activeTrackIndex.value]
-
-      if (!activeTrack) {
-        clipboardStatus.value = "Select a track first."
-        return
-      }
-
-      let clearedCount = 0
-
-      for (let noteIndex = 0; noteIndex < activeTrack.hits.length; noteIndex += 1) {
-        if (!activeTrack.hits[noteIndex]) {
-          continue
-        }
-
-        activeTrack.hits[noteIndex] = false
-        clearedCount += 1
-      }
-
-      shortcutSelectionScope.value = null
-      clipboardStatus.value = `Cleared ${clearedCount} hits from ${activeTrack.name}.`
-      return
-    }
-
-    clipboardStatus.value = "Drag across a track lane to select a region first."
+  if (!selectedIds.size) {
+    clipboardStatus.value = "Drag a marquee around notes first."
     return
   }
 
-  const track = tracks.value[selectionTrackIndex.value]
-
-  if (!track) {
-    return
-  }
-
+  captureUndoSnapshot()
   let clearedCount = 0
 
-  for (const note of notes.value) {
-    const timeMs = noteDisplayTime(note)
-
-    if (timeMs < selectionStartMs.value || timeMs > selectionEndMs.value || !track.hits[note.index]) {
+  for (const track of tracks.value) {
+    if (track.channelType !== "regular") {
       continue
     }
 
-    track.hits[note.index] = false
-    clearedCount += 1
+    const beforeCount = track.regularNotes.length
+
+    track.regularNotes = track.regularNotes.filter((note) => !selectedIds.has(getRegularNoteKey(track, note)))
+    clearedCount += beforeCount - track.regularNotes.length
+    syncRegularTrackHits(track)
   }
 
-  clipboardStatus.value = `Cleared ${clearedCount} hits from ${track.name}.`
-  shortcutSelectionScope.value = null
+  clearSelection()
+  clipboardStatus.value = `Cleared ${clearedCount} selected notes.`
 }
 
 function selectAllNotesInAllTracks() {
@@ -2244,27 +3062,32 @@ function selectAllNotesInAllTracks() {
     return
   }
 
+  const nextSelection = new Set<string>()
+
   for (const track of tracks.value) {
-    track.hits.fill(true)
+    if (track.channelType !== "regular") {
+      continue
+    }
+
+    for (const note of track.regularNotes) {
+      nextSelection.add(getRegularNoteKey(track, note))
+    }
   }
 
-  clearSelection()
-  shortcutSelectionScope.value = "all-tracks"
-  clipboardStatus.value = `Selected all ${notes.value.length} notes across ${tracks.value.length} tracks.`
+  selectedRegularNoteIds.value = nextSelection
+  clipboardStatus.value = `Selected ${nextSelection.size} notes across regular channels.`
 }
 
 function selectAllNotesInActiveTrack() {
   const track = tracks.value[activeTrackIndex.value]
 
-  if (!track || !notes.value.length) {
-    clipboardStatus.value = "Load a map first."
+  if (!track || track.channelType !== "regular") {
+    clipboardStatus.value = "Select a regular channel first."
     return
   }
 
-  track.hits.fill(true)
-  clearSelection()
-  shortcutSelectionScope.value = "active-track"
-  clipboardStatus.value = `Selected all ${notes.value.length} notes in ${track.name}.`
+  selectedRegularNoteIds.value = new Set(track.regularNotes.map((note) => getRegularNoteKey(track, note)))
+  clipboardStatus.value = `Selected ${track.regularNotes.length} notes in ${track.name}.`
 }
 
 function isTypingTarget(target: EventTarget | null) {
@@ -2282,6 +3105,12 @@ function handleGlobalKeydown(event: KeyboardEvent) {
   }
 
   const key = event.key.toLowerCase()
+
+  if ((event.ctrlKey || event.metaKey) && key === "z") {
+    event.preventDefault()
+    undoLastEdit()
+    return
+  }
 
   if ((event.ctrlKey || event.metaKey) && key === "a") {
     event.preventDefault()
@@ -2370,25 +3199,33 @@ async function startPlaybackFrom(startTimeMs: number) {
   transport.position = startSeconds
 
   for (const track of tracks.value) {
+    if (track.channelType === "fx") {
+      for (const clip of track.fxClips) {
+        const player = fxPlayers.get(clip.id)
+
+        if (!player || clip.startMs < startTimeMs - 1) {
+          continue
+        }
+
+        transport.scheduleOnce((time) => {
+          player.start(time)
+        }, Math.max(0, clip.startMs / 1_000))
+      }
+
+      continue
+    }
+
     const player = players.get(track.id)
 
     if (!player) {
       continue
     }
 
-    track.hits.forEach((enabled, noteIndex) => {
-      const note = notes.value[noteIndex]
-
-      if (!enabled || !note) {
-        return
-      }
-
-      const scheduledTimeMs = snapPlaybackToGrid.value
-        ? getSnappedTimeMs(note.timeMs)
-        : note.timeMs
+    for (const regularNote of track.regularNotes) {
+      const scheduledTimeMs = regularNote.startMs
 
       if (scheduledTimeMs < startTimeMs - 1) {
-        return
+        continue
       }
 
       const scheduledSeconds = Math.max(0, (scheduledTimeMs + audioOffsetMs.value) / 1_000)
@@ -2396,7 +3233,7 @@ async function startPlaybackFrom(startTimeMs: number) {
       transport.scheduleOnce((time) => {
         player.start(time)
       }, scheduledSeconds)
-    })
+    }
   }
 
   if (backingAudio.value && backingAudioUrl.value) {
@@ -2431,6 +3268,10 @@ function stopPlayback(resetPlayhead = true) {
     for (const player of players.values()) {
       player.stop()
     }
+
+    for (const player of fxPlayers.values()) {
+      player.stop()
+    }
   }
 
   if (backingAudio.value) {
@@ -2461,17 +3302,27 @@ async function rebuildPlayers(toneApi: ToneNamespace) {
     player.dispose()
   }
 
+  for (const player of fxPlayers.values()) {
+    player.dispose()
+  }
+
   players = new Map()
+  fxPlayers = new Map()
 
   for (const track of tracks.value) {
-    if (!track.sampleUrl) {
+    if (track.channelType === "regular" && track.sampleUrl) {
+      players.set(track.id, new toneApi.Player(track.sampleUrl).toDestination())
       continue
     }
 
-    players.set(track.id, new toneApi.Player(track.sampleUrl).toDestination())
+    if (track.channelType === "fx") {
+      for (const clip of track.fxClips) {
+        fxPlayers.set(clip.id, new toneApi.Player(clip.sampleUrl).toDestination())
+      }
+    }
   }
 
-  if (players.size > 0) {
+  if (players.size > 0 || fxPlayers.size > 0) {
     await toneApi.loaded()
   }
 }
@@ -2698,16 +3549,23 @@ function finishTimelinePan(event: PointerEvent) {
 }
 
 function handleTimelinePointerMove(event: PointerEvent) {
+  updateFxClipDrag(event)
+  updateRegularNoteDrag(event)
   updateTimelinePan(event)
   updateRangeSelection(event)
 }
 
 function handleTimelinePointerUp(event: PointerEvent) {
+  finishFxClipDrag()
+  finishRegularNoteDrag()
   finishTimelinePan(event)
   finishRangeSelection()
 }
 
 function handleTimelinePointerLeave(event: PointerEvent) {
+  finishFxClipDrag()
+  finishRegularNoteDrag()
+
   if (isPanningTimeline.value) {
     finishTimelinePan(event)
   }
@@ -2822,11 +3680,20 @@ function trackLaneStyle(trackIndex: number) {
     "--track-accent-dark": color.accentDark,
     "--track-accent-muted": color.accentMuted,
     "--track-accent-soft": color.accentSoft,
+    "--track-lane-height": `${getTrackLaneHeight(trackIndex)}px`,
   }
 }
 
+function channelTypeLabel(track: Track) {
+  return track.channelType === "fx" ? "FX" : "HS"
+}
+
 function trackHitCount(track: Track) {
-  return track.hits.filter(Boolean).length
+  if (track.channelType === "fx") {
+    return track.fxClips.length
+  }
+
+  return track.regularNotes.length
 }
 
 function formatTime(timeMs: number) {
@@ -2843,6 +3710,7 @@ function formatSlotKind(kind: HitSlotKind) {
     hold: "hold",
     slider: "slider head",
     "slider-body": "slider body",
+    "slider-repeat": "slider repeat",
     "slider-end": "slider end",
     spinner: "spinner",
   }
@@ -2866,8 +3734,15 @@ onBeforeUnmount(() => {
     player.dispose()
   }
 
+  for (const player of fxPlayers.values()) {
+    player.dispose()
+  }
+
   for (const track of tracks.value) {
     revokeCustomSample(track)
+    for (const clip of track.fxClips) {
+      revokeFxClip(clip)
+    }
   }
 
   if (backingAudioUrl.value) {
@@ -2960,6 +3835,12 @@ onBeforeUnmount(() => {
           {{ isPlaying ? "Stop" : "Play" }}
         </button>
 
+        <div class="channel-add-controls">
+          <button class="ghost-button" type="button" @click="addRegularChannel">Add HS</button>
+          <button class="ghost-button" type="button" @click="addFxChannel">Add FX</button>
+          <button class="ghost-button" type="button" @click="snapAllSounds">Snap all</button>
+        </div>
+
         <div class="stat">
           <span>Playhead</span>
           <strong>{{ formatTime(currentTimeMs) }}</strong>
@@ -3042,6 +3923,22 @@ onBeforeUnmount(() => {
             </span>
           </div>
 
+          <div class="rhythm-preview-lane" aria-hidden="true">
+            <span class="ruler-label preview-label">Rhythm</span>
+            <span
+              v-for="note in visibleSliderBodySlots"
+              :key="`preview-body-${note.id}`"
+              class="preview-slider-body"
+              :style="sliderBodyStyle(note)"
+            />
+            <span
+              v-for="note in visibleMarkerSlots"
+              :key="`preview-${note.id}`"
+              class="preview-note"
+              :style="{ left: noteLeft(note) }"
+            />
+          </div>
+
           <div class="snap-layer" aria-hidden="true">
             <span
               v-for="line in visibleSnapLines"
@@ -3055,136 +3952,196 @@ onBeforeUnmount(() => {
           <div class="playhead" :style="{ left: playheadLeft() }" />
 
           <div
+            v-if="isSelectingRange && selectionAnchorMs !== null && selectionFocusMs !== null"
+            class="selection-marquee"
+            :style="selectionMarqueeStyle()"
+          />
+
+          <div
             v-for="(track, trackIndex) in tracks"
             :key="track.id"
             class="track-lane"
-            :class="{ active: trackIndex === activeTrackIndex }"
+            :class="{
+              active: trackIndex === activeTrackIndex,
+              collapsed: track.collapsed,
+              'fx-lane': track.channelType === 'fx',
+            }"
             :style="trackLaneStyle(trackIndex)"
+            @dblclick="addRegularNoteAtEvent($event, trackIndex)"
             @pointerdown="startRangeSelection($event, trackIndex)"
           >
             <div class="lane-label" @click.stop="setActiveTrack(trackIndex)">
-              <strong>{{ track.name }}</strong>
-              <span>{{ track.sampleName }}</span>
+              <div class="lane-header">
+                <input v-model="track.name" class="lane-name-input" aria-label="Channel name" />
+                <span v-if="!track.collapsed">{{ channelTypeLabel(track) }}</span>
+                <button
+                  class="lane-icon-button"
+                  type="button"
+                  :aria-label="track.collapsed ? 'Expand channel' : 'Collapse channel'"
+                  @click.stop="toggleTrackCollapsed(trackIndex)"
+                >
+                  {{ track.collapsed ? "+" : "-" }}
+                </button>
+                <button
+                  v-if="!track.collapsed"
+                  class="lane-icon-button"
+                  type="button"
+                  aria-label="Remove channel"
+                  @click.stop="removeTrack(trackIndex)"
+                >
+                  x
+                </button>
+                <button
+                  v-if="!track.collapsed"
+                  class="lane-pill-button"
+                  type="button"
+                  @click.stop="clearTrack(trackIndex)"
+                >
+                  Clear
+                </button>
+              </div>
+
+              <template v-if="track.channelType === 'regular' && !track.collapsed">
+                <details class="hs-picker" @toggle="setHitsoundPickerOpen($event, track)">
+                  <summary>
+                    <span>HS</span>
+                    <strong>{{ track.sampleName }}</strong>
+                  </summary>
+
+                  <div class="hs-source-toggle" role="group" aria-label="Hitsound source">
+                    <span class="hs-source-label">Source</span>
+                    <button
+                      type="button"
+                      :aria-pressed="getHitsoundPickerMode(track) === 'default'"
+                      :class="{ selected: getHitsoundPickerMode(track) === 'default' }"
+                      @click.stop="setHitsoundPickerMode(track, 'default')"
+                    >
+                      Default
+                    </button>
+                    <button
+                      type="button"
+                      :aria-pressed="getHitsoundPickerMode(track) === 'custom'"
+                      :class="{ selected: getHitsoundPickerMode(track) === 'custom' }"
+                      @click.stop="setHitsoundPickerMode(track, 'custom')"
+                    >
+                      Custom
+                    </button>
+                  </div>
+
+                  <div v-if="getHitsoundPickerMode(track) === 'default'" class="hs-picker-section">
+                    <span class="hs-picker-root">default</span>
+                    <div class="hs-bank-grid">
+                      <div v-for="bank in sampleBanks" :key="`default-${bank}`" class="hs-bank-group">
+                        <span>{{ bank }}</span>
+                        <button
+                          v-for="sound in sampleSounds"
+                          :key="`${bank}-${sound}`"
+                          class="hs-option"
+                          :class="{ selected: isDefaultHitsoundSelected(track, bank, sound) }"
+                          type="button"
+                          @click.stop="selectDefaultHitsound(trackIndex, bank, sound)"
+                        >
+                          {{ sound.replace(/^hit/, "") }}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div v-else class="hs-picker-section">
+                    <span class="hs-picker-root">custom</span>
+                    <div class="lane-mini-controls">
+                      <input
+                        v-model.number="track.customSampleIndex"
+                        min="1"
+                        step="1"
+                        type="number"
+                        title="Custom sample set"
+                        @change="handleCustomSampleIndexChange(trackIndex)"
+                      />
+                      <input
+                        class="lane-file-input"
+                        accept="audio/*"
+                        type="file"
+                        title="Upload custom HS"
+                        @change="handleSampleUpload($event, trackIndex)"
+                      />
+                    </div>
+                    <div class="hs-bank-grid">
+                      <div v-for="bank in sampleBanks" :key="`custom-${bank}`" class="hs-bank-group">
+                        <span>{{ bank }}</span>
+                        <button
+                          v-for="sound in sampleSounds"
+                          :key="`custom-${bank}-${sound}`"
+                          class="hs-option"
+                          :class="{ selected: isCustomHitsoundTypeSelected(track, bank, sound) }"
+                          type="button"
+                          @click.stop="selectCustomHitsoundType(trackIndex, bank, sound)"
+                        >
+                          {{ sound.replace(/^hit/, "") }}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </details>
+              </template>
+
+              <template v-else-if="!track.collapsed">
+                <input
+                  class="lane-file-input"
+                  accept="audio/*"
+                  type="file"
+                  title="Upload one-shot"
+                  @change="handleFxClipUpload($event, trackIndex)"
+                />
+                <span>{{ track.fxClips.length }} clips</span>
+              </template>
             </div>
 
-            <div
-              v-if="hasSelection && selectionTrackIndex === trackIndex"
-              class="selection-range"
-              :style="selectionRangeStyle()"
-            />
+            <template v-if="track.channelType === 'fx' && !track.collapsed">
+              <button
+                v-for="clip in track.fxClips"
+                :key="clip.id"
+                class="fx-clip"
+                :class="{ assigned: clip.assignedNoteIndex !== null }"
+                :style="fxClipStyle(clip)"
+                type="button"
+                :title="`${clip.name}${clip.assignedNoteIndex !== null ? ` assigned to ${formatTime(notes[clip.assignedNoteIndex]?.timeMs ?? clip.startMs)}` : ''}`"
+                @click.stop="assignFxClipToNearestSlot(clip)"
+                @pointerdown.stop="startFxClipDrag($event, trackIndex, clip)"
+                @dblclick.stop="removeFxClip(trackIndex, clip.id)"
+              >
+                {{ clip.name }}
+              </button>
+            </template>
 
-            <button
-              v-for="note in visibleSliderBodySlots"
-              :key="`${track.id}-${note.id}-body`"
-              class="slider-body-strip"
-              :class="{
-                selected: track.hits[note.index],
-                active: isNearPlayhead(note),
-              }"
-              :style="sliderBodyStyle(note)"
-              type="button"
-              :title="`${track.name} at ${formatTime(displayTimeMs(note))} (${formatSlotKind(note.kind)}, original ${formatTime(note.timeMs)}, source ${formatTime(note.sourceTimeMs)}, x:${note.x}, y:${note.y})`"
-              @click.stop="toggleHit(trackIndex, note.index)"
-            />
-
-            <button
-              v-for="note in visibleMarkerSlots"
-              :key="`${track.id}-${note.id}`"
-              class="note-cell"
-              :class="{
-                selected: track.hits[note.index],
-                active: isNearPlayhead(note),
-              }"
-              :style="{ left: noteLeft(note) }"
-              type="button"
-              :title="`${track.name} at ${formatTime(displayTimeMs(note))} (${formatSlotKind(note.kind)}, original ${formatTime(note.timeMs)}, source ${formatTime(note.sourceTimeMs)}, x:${note.x}, y:${note.y})`"
-              @click.stop="toggleHit(trackIndex, note.index)"
-            />
+            <template v-else-if="track.channelType === 'regular'">
+              <button
+                v-for="note in visibleRegularNotes(track)"
+                :key="`${track.id}-${note.id}-placed`"
+                class="fx-clip placed-note"
+                :class="{
+                  assigned: note.assignedNoteIndex !== null,
+                  selected: selectedRegularNoteIds.has(getRegularNoteKey(track, note)),
+                  active: note.assignedNoteIndex !== null && isNearPlayhead(notes[note.assignedNoteIndex]),
+                }"
+                :style="regularNoteStyle(note)"
+                type="button"
+                :aria-label="`${track.name} note at ${formatTime(note.startMs)}`"
+                :title="`${track.name} at ${formatTime(note.startMs)}${note.assignedNoteIndex !== null ? `, assigned to ${formatSlotKind(notes[note.assignedNoteIndex]?.kind ?? 'circle')}` : ', not assigned to osu slot'}`"
+                @pointerdown.stop="startRegularNoteDrag($event, trackIndex, note)"
+                @dblclick.stop="removeRegularNote(trackIndex, note.id)"
+              />
+            </template>
           </div>
         </div>
-      </div>
-    </section>
-
-    <section
-      v-if="notes.length"
-      class="panel track-panel"
-      :class="{ collapsed: !isTrackDrawerOpen }"
-    >
-      <div class="section-heading track-drawer-heading">
-        <div>
-          <p class="eyebrow">Tracks</p>
-          <h2>Assign samples</h2>
-        </div>
-        <div class="track-drawer-actions">
-          <span>{{ tracks.length }} tracks</span>
-          <button class="ghost-button" type="button" @click="addTrack">Add track</button>
-          <button class="ghost-button" type="button" @click="isTrackDrawerOpen = !isTrackDrawerOpen">
-            {{ isTrackDrawerOpen ? "Hide" : "Show" }}
-          </button>
-        </div>
-      </div>
-
-      <div v-show="isTrackDrawerOpen" class="track-list">
-        <article
-          v-for="(track, trackIndex) in tracks"
-          :key="track.id"
-          class="track-card"
-          :class="{ active: trackIndex === activeTrackIndex }"
-          @click="setActiveTrack(trackIndex)"
-        >
-          <input v-model="track.name" class="track-name" aria-label="Track name" />
-          <p>{{ trackHitCount(track) }} hits</p>
-          <label>
-            <span>Default sample</span>
-            <select
-              :value="track.sampleSource === 'default' ? track.sampleUrl : ''"
-              @change="handleDefaultSampleChange($event, trackIndex)"
-            >
-              <option value="" disabled>Choose default</option>
-              <option v-for="sample in defaultSamples" :key="sample.url" :value="sample.url">
-                {{ sample.name }}
-              </option>
-            </select>
-          </label>
-          <label>
-            <span>Custom set</span>
-            <input
-              v-model.number="track.customSampleIndex"
-              min="1"
-              step="1"
-              type="number"
-              @change="handleCustomSampleIndexChange(trackIndex)"
-            />
-          </label>
-          <label>
-            <span>Custom type</span>
-            <select
-              :value="`${track.customSampleBank}-${track.customSampleSound}`"
-              @change="handleCustomSampleTypeChange($event, trackIndex)"
-            >
-              <option v-for="sampleType in sampleTypeOptions" :key="sampleType.label" :value="sampleType.label">
-                {{ sampleType.label }}
-              </option>
-            </select>
-          </label>
-          <label>
-            <span>Custom sample</span>
-            <input accept="audio/*" type="file" @change="handleSampleUpload($event, trackIndex)" />
-          </label>
-          <strong>{{ track.sampleName }}</strong>
-          <div class="track-actions">
-            <button type="button" @click="clearTrack(trackIndex)">Clear</button>
-            <button type="button" @click="removeTrack(trackIndex)">Remove</button>
-          </div>
-        </article>
       </div>
     </section>
 
     <section v-if="!notes.length" class="panel empty-panel">
       <h2>Start with an osu file</h2>
       <p>
-        Once loaded, circles and slider parts become clickable timeline slots on
-        each sample track.
+        Once loaded, the top guide shows the osu rhythm. Double-click regular
+        channels to place snapped notes, then drag them like clips.
       </p>
     </section>
   </main>
@@ -3244,7 +4201,6 @@ onBeforeUnmount(() => {
 }
 
 .upload-panel h1,
-.track-panel h2,
 .empty-panel h2 {
   margin: 0;
   color: #f8fafc;
@@ -3327,7 +4283,6 @@ button:disabled {
 .compact-upload span,
 .compact-control span,
 .stat span,
-.track-card span,
 .lane-label span {
   color: #94a3b8;
   font-size: 0.8rem;
@@ -3354,53 +4309,7 @@ button:disabled {
   height: 34px;
 }
 
-.track-list {
-  display: flex;
-  gap: 10px;
-  margin-top: 10px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding: 2px 2px 8px;
-  scrollbar-width: thin;
-}
-
-.track-card {
-  display: grid;
-  flex: 0 0 860px;
-  grid-template-columns: 112px 52px minmax(138px, 1fr) 72px minmax(138px, 1fr) 128px minmax(116px, 0.8fr) auto;
-  align-items: end;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  border-radius: 14px;
-  background: rgba(30, 41, 59, 0.64);
-  cursor: pointer;
-}
-
-.track-card.active {
-  border-color: #67e8f9;
-  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.18);
-}
-
-.track-card p,
-.track-card strong {
-  overflow: hidden;
-  margin: 0;
-  color: #cbd5e1;
-  font-size: 0.82rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.track-card label {
-  display: grid;
-  gap: 4px;
-}
-
-.track-name,
-.compact-control input,
-.track-card select,
-.track-card input[type="number"] {
+.compact-control input {
   width: 100%;
   border: 1px solid rgba(148, 163, 184, 0.28);
   border-radius: 10px;
@@ -3409,20 +4318,11 @@ button:disabled {
   background: rgba(15, 23, 42, 0.85);
 }
 
-.track-card input[type="file"] {
-  max-width: 130px;
-  color: #cbd5e1;
-  font-size: 0.72rem;
-}
-
-.track-actions {
-  display: flex;
-  gap: 8px;
-}
-
 .ghost-button,
-.track-actions button,
-.clipboard-controls button {
+.clipboard-controls button,
+.lane-actions button,
+.lane-pill-button,
+.hs-option {
   border: 1px solid rgba(148, 163, 184, 0.28);
   border-radius: 999px;
   padding: 7px 11px;
@@ -3444,53 +4344,15 @@ button:disabled {
   overflow: hidden;
 }
 
-.track-panel {
-  position: fixed;
-  right: 16px;
-  bottom: 12px;
-  left: 16px;
-  z-index: 20;
-  width: auto;
-  max-height: 38vh;
-  padding: 10px 12px;
-  border-radius: 16px;
-  background: rgba(15, 23, 42, 0.96);
-  backdrop-filter: blur(16px);
-  transition: transform 160ms ease;
-}
-
-.track-panel.collapsed {
-  transform: translateY(calc(100% - 46px));
-}
-
-.track-drawer-heading {
-  gap: 12px;
-}
-
-.track-drawer-heading .eyebrow {
-  margin-bottom: 2px;
-}
-
-.track-drawer-heading h2 {
-  font-size: 1rem;
-}
-
-.track-drawer-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.track-drawer-actions span {
-  color: #94a3b8;
-  font-size: 0.8rem;
-}
-
 .transport {
   flex-wrap: wrap;
   flex: 0 0 auto;
   margin-bottom: 12px;
+}
+
+.channel-add-controls {
+  display: flex;
+  gap: 8px;
 }
 
 .play-button {
@@ -3583,7 +4445,7 @@ button:disabled {
   position: sticky;
   left: 0;
   z-index: 3;
-  width: 190px;
+  width: 280px;
 }
 
 .ruler-label {
@@ -3605,9 +4467,50 @@ button:disabled {
   white-space: nowrap;
 }
 
+.rhythm-preview-lane {
+  position: relative;
+  z-index: 1;
+  height: 38px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.74);
+  pointer-events: none;
+}
+
+.preview-label {
+  display: grid;
+  height: 38px;
+  place-items: center start;
+  padding-left: 18px;
+  color: #94a3b8;
+  font-size: 0.78rem;
+  font-weight: 800;
+  background: rgba(15, 23, 42, 0.96);
+}
+
+.preview-note {
+  position: absolute;
+  top: 50%;
+  z-index: 2;
+  width: 6px;
+  height: 18px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: rgba(103, 232, 249, 0.65);
+}
+
+.preview-slider-body {
+  position: absolute;
+  top: 50%;
+  z-index: 1;
+  height: 10px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background: rgba(103, 232, 249, 0.22);
+}
+
 .snap-layer {
   position: absolute;
-  top: 44px;
+  top: 82px;
   right: 0;
   bottom: 14px;
   left: 0;
@@ -3635,7 +4538,7 @@ button:disabled {
 .track-lane {
   position: relative;
   z-index: 1;
-  height: 74px;
+  height: var(--track-lane-height, 132px);
   border-bottom: 1px solid var(--track-accent-soft, rgba(148, 163, 184, 0.14));
   background:
     linear-gradient(90deg, var(--track-accent-soft, transparent), transparent 34rem),
@@ -3644,6 +4547,10 @@ button:disabled {
       transparent 0 calc(var(--second-width) - 1px),
       rgba(148, 163, 184, 0.1) calc(var(--second-width) - 1px) var(--second-width)
     );
+}
+
+.track-lane.collapsed {
+  overflow: visible;
 }
 
 .track-lane:last-child {
@@ -3656,10 +4563,11 @@ button:disabled {
 
 .lane-label {
   display: grid;
-  align-content: center;
+  align-content: start;
+  gap: 6px;
   z-index: 8;
-  height: 74px;
-  padding: 0 16px;
+  height: var(--track-lane-height, 132px);
+  padding: 10px 12px;
   border-right: 2px solid var(--track-accent, rgba(148, 163, 184, 0.18));
   background:
     linear-gradient(90deg, var(--track-accent-soft, transparent), transparent),
@@ -3668,84 +4576,267 @@ button:disabled {
   cursor: pointer;
 }
 
-.lane-label strong,
+.track-lane.collapsed .lane-label {
+  align-content: center;
+  padding: 0 10px;
+}
+
 .lane-label span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.lane-label strong {
-  color: var(--track-accent, #f8fafc);
+.lane-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.selection-range {
-  position: absolute;
-  top: 8px;
-  bottom: 8px;
-  z-index: 2;
-  border: 1px solid var(--track-accent, #67e8f9);
+.lane-header span {
+  flex: 0 0 auto;
+  color: var(--track-accent, #67e8f9);
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.lane-icon-button {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 999px;
+  padding: 0;
+  color: #e2e8f0;
+  background: rgba(15, 23, 42, 0.82);
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+.lane-pill-button {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  font-size: 0.68rem;
+}
+
+.lane-name-input,
+.lane-mini-controls input,
+.lane-mini-controls select {
+  min-width: 0;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 9px;
+  padding: 5px 7px;
+  color: #f8fafc;
+  background: rgba(15, 23, 42, 0.9);
+  font-size: 0.75rem;
+}
+
+.lane-name-input {
+  width: 100%;
+  color: var(--track-accent, #f8fafc);
+  font-weight: 800;
+}
+
+.track-lane.collapsed .lane-name-input {
+  border-color: transparent;
+  padding: 2px 0;
+  background: transparent;
+}
+
+.lane-mini-controls,
+.lane-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.lane-mini-controls input {
+  width: 52px;
+}
+
+.lane-mini-controls select {
+  flex: 1;
+}
+
+.lane-file-input {
+  width: 100%;
+  color: #cbd5e1;
+  font-size: 0.68rem;
+}
+
+.hs-picker {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.hs-picker summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: #cbd5e1;
+  cursor: pointer;
+  font-size: 0.72rem;
+}
+
+.hs-picker summary strong {
+  overflow: hidden;
+  min-width: 0;
+  color: #f8fafc;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hs-source-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  padding: 6px;
+  border: 1px solid var(--track-accent-muted, rgba(103, 232, 249, 0.36));
+  border-radius: 12px;
+  background:
+    linear-gradient(135deg, var(--track-accent-soft, rgba(103, 232, 249, 0.12)), transparent),
+    rgba(2, 6, 23, 0.5);
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.66);
+}
+
+.hs-source-label {
+  grid-column: 1 / -1;
+  color: var(--track-accent, #67e8f9);
+  font-size: 0.62rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hs-source-toggle button {
+  min-width: 0;
+  border-color: rgba(148, 163, 184, 0.3);
+  padding: 6px 8px;
+  background: rgba(15, 23, 42, 0.9);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.hs-source-toggle button.selected {
+  border-color: var(--track-accent, #67e8f9);
+  color: #f8fafc;
+  background:
+    linear-gradient(135deg, var(--track-accent-dark, #0891b2), var(--track-accent-soft, rgba(103, 232, 249, 0.14))),
+    rgba(15, 23, 42, 0.92);
+  box-shadow: 0 0 0 2px var(--track-accent-soft, rgba(103, 232, 249, 0.14));
+}
+
+.hs-picker-section {
+  display: grid;
+  gap: 4px;
+  padding: 5px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.52);
+}
+
+.hs-picker-root,
+.hs-bank-group > span {
+  color: #94a3b8;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.hs-bank-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.hs-bank-group {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.hs-option {
+  overflow: hidden;
+  padding: 2px 4px;
+  font-size: 0.63rem;
+  line-height: 1.05;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hs-option.selected {
+  border-color: var(--track-accent, #67e8f9);
+  color: #f8fafc;
   background: var(--track-accent-soft, rgba(103, 232, 249, 0.14));
+}
+
+.lane-actions button {
+  padding: 4px 8px;
+  font-size: 0.7rem;
+}
+
+.selection-marquee {
+  position: absolute;
+  z-index: 6;
+  border: 1px solid rgba(103, 232, 249, 0.9);
+  background: rgba(103, 232, 249, 0.14);
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.4);
   pointer-events: none;
 }
 
-.slider-body-strip {
-  position: absolute;
-  top: 50%;
-  z-index: 2;
-  height: 14px;
-  transform: translateY(-50%);
-  border: 1px solid var(--track-accent-muted, rgba(148, 163, 184, 0.45));
-  border-radius: 0;
-  background: rgba(51, 65, 85, 0.92);
-}
-
-.slider-body-strip:hover,
-.slider-body-strip.active {
-  border-color: var(--track-accent, #67e8f9);
-  box-shadow: 0 0 0 3px var(--track-accent-soft, rgba(103, 232, 249, 0.12));
-}
-
-.slider-body-strip.selected {
-  border-color: var(--track-accent, #22d3ee);
-  background: linear-gradient(
-    90deg,
-    var(--track-accent-dark, #0891b2),
-    var(--track-accent, #67e8f9),
-    var(--track-accent-dark, #0891b2)
-  );
-}
-
-.note-cell {
+.fx-clip {
   position: absolute;
   top: 50%;
   z-index: 3;
-  width: 22px;
+  overflow: hidden;
+  height: 46px;
+  transform: translateY(-50%);
+  border: 1px solid var(--track-accent, #67e8f9);
+  border-radius: 10px;
+  padding: 0 10px;
+  color: #f8fafc;
+  background:
+    linear-gradient(135deg, var(--track-accent-dark, #0891b2), rgba(15, 23, 42, 0.9)),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.2) 0 2px, transparent 2px 8px);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  box-shadow: 0 12px 28px rgba(2, 6, 23, 0.35);
+  cursor: grab;
+}
+
+.fx-clip.assigned {
+  box-shadow:
+    0 0 0 3px var(--track-accent-soft, rgba(103, 232, 249, 0.16)),
+    0 12px 28px rgba(2, 6, 23, 0.35);
+}
+
+.placed-note {
   height: 22px;
-  transform: translate(-50%, -50%);
-  border: 1px solid var(--track-accent-muted, rgba(148, 163, 184, 0.35));
   border-radius: 50%;
-  background: rgba(51, 65, 85, 0.9);
+  padding: 0;
+  text-align: center;
 }
 
-.note-cell:hover,
-.note-cell.active {
-  border-color: var(--track-accent, #67e8f9);
-  box-shadow: 0 0 0 4px var(--track-accent-soft, rgba(103, 232, 249, 0.14));
+.placed-note.active {
+  border-color: #f97316;
+  box-shadow:
+    0 0 0 3px rgba(249, 115, 22, 0.2),
+    0 12px 28px rgba(2, 6, 23, 0.35);
 }
 
-.note-cell.selected {
-  border-color: var(--track-accent, #22d3ee);
-  background: linear-gradient(
-    180deg,
-    var(--track-accent, #67e8f9),
-    var(--track-accent-dark, #0891b2)
-  );
+.placed-note.selected {
+  border-color: #f8fafc;
+  box-shadow:
+    0 0 0 3px rgba(248, 250, 252, 0.24),
+    0 12px 28px rgba(2, 6, 23, 0.35);
 }
 
 .playhead {
   position: absolute;
-  top: 44px;
+  top: 82px;
   bottom: 0;
   z-index: 4;
   width: 2px;
