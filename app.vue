@@ -70,6 +70,8 @@ type RegularNote = {
 type FxClip = {
   id: number
   name: string
+  bank: SampleBank
+  sound: SampleSound
   sampleUrl: string
   mimeType: string
   data: ArrayBuffer
@@ -137,7 +139,7 @@ type CopiedPattern = {
 type UndoTrackSnapshot = {
   trackId: number
   regularNotes: RegularNote[]
-  fxClips: Array<Pick<FxClip, "id" | "startMs" | "durationMs" | "assignedNoteIndex">>
+  fxClips: Array<Pick<FxClip, "id" | "bank" | "sound" | "startMs" | "durationMs" | "assignedNoteIndex">>
 }
 
 type UndoSnapshot = {
@@ -159,6 +161,7 @@ type ExportSample = {
 type HitsoundLayer = {
   normal?: ExportSample
   addition?: ExportSample
+  additions?: ExportSample[]
   hitSoundBits: number
 }
 
@@ -167,6 +170,13 @@ type SourceHitsoundAssignment = {
   sliderBody?: HitsoundLayer
   sliderEnd?: HitsoundLayer
   sliderEdges?: Map<number, HitsoundLayer>
+}
+
+type ExportContext = {
+  samplesByFileName: Map<string, ExportSample>
+  fxSamplesByClipId: Map<number, ExportSample>
+  occupiedCustomIndices: Map<string, Set<number>>
+  mixedSamplesByKey: Map<string, ExportSample>
 }
 
 type SavedCustomSample = Omit<CustomSample, "data"> & {
@@ -226,6 +236,7 @@ const closedTrackLaneHeight = 82
 const defaultPickerTrackLaneHeight = 280
 const customPickerTrackLaneHeight = 310
 const fxTrackLaneHeight = 82
+const fxEditorTrackLaneHeight = 134
 const guideSnapThresholdPx = 12
 const markerDiameter = 22
 const collapsedTrackLaneHeight = markerDiameter
@@ -317,6 +328,7 @@ const selectionAnchorTrackIndex = ref<number | null>(null)
 const selectionFocusTrackIndex = ref<number | null>(null)
 const isSelectingRange = ref(false)
 const selectedRegularNoteIds = ref<Set<string>>(new Set())
+const selectedFxClipId = ref<number | null>(null)
 const copiedPattern = ref<CopiedPattern | null>(null)
 const clipboardStatus = ref("")
 const suppressNextTimelineClick = ref(false)
@@ -679,6 +691,8 @@ function captureUndoSnapshot() {
       regularNotes: track.regularNotes.map((note) => ({ ...note })),
       fxClips: track.fxClips.map((clip) => ({
         id: clip.id,
+        bank: clip.bank,
+        sound: clip.sound,
         startMs: clip.startMs,
         durationMs: clip.durationMs,
         assignedNoteIndex: clip.assignedNoteIndex,
@@ -728,6 +742,8 @@ function undoLastEdit() {
         clip.startMs = clipSnapshot.startMs
         clip.durationMs = clipSnapshot.durationMs
         clip.assignedNoteIndex = clipSnapshot.assignedNoteIndex
+        clip.bank = clipSnapshot.bank
+        clip.sound = clipSnapshot.sound
       }
     }
   }
@@ -1442,6 +1458,8 @@ function saveProject() {
       fxClips: track.fxClips.map((clip) => ({
         id: clip.id,
         name: clip.name,
+        bank: clip.bank,
+        sound: clip.sound,
         mimeType: clip.mimeType,
         startMs: clip.startMs,
         durationMs: clip.durationMs,
@@ -1521,6 +1539,8 @@ async function handleProjectLoad(event: Event) {
       fxClips.push({
         id: savedClip.id,
         name: savedClip.name,
+        bank: savedClip.bank ?? "drum",
+        sound: savedClip.sound ?? "hitfinish",
         sampleUrl: URL.createObjectURL(new Blob([data], { type: savedClip.mimeType })),
         mimeType: savedClip.mimeType,
         data,
@@ -1771,6 +1791,8 @@ async function handleFxClipUpload(event: Event, trackIndex: number) {
   const clip: FxClip = {
     id: ++fxClipIdSeed,
     name: file.name,
+    bank: "drum",
+    sound: "hitfinish",
     sampleUrl,
     mimeType: file.type || "audio/wav",
     data,
@@ -1780,6 +1802,7 @@ async function handleFxClipUpload(event: Event, trackIndex: number) {
   }
 
   track.fxClips.push(clip)
+  selectedFxClipId.value = clip.id
   input.value = ""
 
   const audio = new Audio(sampleUrl)
@@ -1842,6 +1865,44 @@ function updateFxClipDrag(event: PointerEvent) {
 
 function finishFxClipDrag() {
   fxClipDrag = null
+}
+
+function selectFxClip(trackIndex: number, clip: FxClip) {
+  setActiveTrack(trackIndex)
+  selectedFxClipId.value = clip.id
+  assignFxClipToNearestSlot(clip)
+}
+
+function getSelectedFxClip(track: Track) {
+  if (track.channelType !== "fx" || selectedFxClipId.value === null) {
+    return null
+  }
+
+  return track.fxClips.find((clip) => clip.id === selectedFxClipId.value) ?? null
+}
+
+function updateSelectedFxClipBank(track: Track, event: Event) {
+  const clip = getSelectedFxClip(track)
+  const bank = (event.target as HTMLSelectElement).value as SampleBank
+
+  if (!clip) {
+    return
+  }
+
+  captureUndoSnapshot()
+  clip.bank = bank
+}
+
+function updateSelectedFxClipSound(track: Track, event: Event) {
+  const clip = getSelectedFxClip(track)
+  const sound = (event.target as HTMLSelectElement).value as SampleSound
+
+  if (!clip) {
+    return
+  }
+
+  captureUndoSnapshot()
+  clip.sound = sound
 }
 
 function assignFxClipToNearestSlot(clip: FxClip) {
@@ -2140,6 +2201,10 @@ function removeFxClip(trackIndex: number, clipId: number) {
   const [clip] = track.fxClips.splice(clipIndex, 1)
 
   if (clip) {
+    if (selectedFxClipId.value === clip.id) {
+      selectedFxClipId.value = null
+    }
+
     revokeFxClip(clip)
     fxPlayers.get(clip.id)?.dispose()
     fxPlayers.delete(clip.id)
@@ -2198,6 +2263,10 @@ function removeTrack(trackIndex: number) {
 
   revokeCustomSample(track)
   for (const clip of track.fxClips) {
+    if (selectedFxClipId.value === clip.id) {
+      selectedFxClipId.value = null
+    }
+
     revokeFxClip(clip)
     fxPlayers.get(clip.id)?.dispose()
     fxPlayers.delete(clip.id)
@@ -2253,7 +2322,13 @@ function clearTrack(trackIndex: number) {
   }
 
   if (track.channelType === "fx") {
+    captureUndoSnapshot()
+
     for (const clip of track.fxClips) {
+      if (selectedFxClipId.value === clip.id) {
+        selectedFxClipId.value = null
+      }
+
       revokeFxClip(clip)
       fxPlayers.get(clip.id)?.dispose()
       fxPlayers.delete(clip.id)
@@ -2307,10 +2382,104 @@ function mergeSampleIntoLayer(layer: HitsoundLayer, sample: ExportSample) {
   }
 
   layer.hitSoundBits |= getHitSoundBit(sample.sound)
+  layer.additions = [...(layer.additions ?? []), sample]
   layer.addition = sample
 }
 
-function getSelectedHitsoundLayer(noteIndex: number, fallbackNormal: ExportSample) {
+function customIndexKey(bank: SampleBank, sound: SampleSound) {
+  return `${bank}-${sound}`
+}
+
+function reserveCustomIndex(context: ExportContext, bank: SampleBank, sound: SampleSound, sampleIndex: number) {
+  const key = customIndexKey(bank, sound)
+  const occupied = context.occupiedCustomIndices.get(key) ?? new Set<number>()
+
+  occupied.add(Math.max(1, Math.round(sampleIndex) || 1))
+  context.occupiedCustomIndices.set(key, occupied)
+}
+
+function allocateCustomIndex(context: ExportContext, bank: SampleBank, sound: SampleSound) {
+  const key = customIndexKey(bank, sound)
+  const occupied = context.occupiedCustomIndices.get(key) ?? new Set<number>()
+  let sampleIndex = 1
+
+  while (occupied.has(sampleIndex)) {
+    sampleIndex += 1
+  }
+
+  occupied.add(sampleIndex)
+  context.occupiedCustomIndices.set(key, occupied)
+
+  return sampleIndex
+}
+
+function addExportSampleToContext(context: ExportContext, sample: ExportSample) {
+  if (!sample.data) {
+    return
+  }
+
+  reserveCustomIndex(context, sample.bank, sample.sound, sample.sampleIndex)
+  context.samplesByFileName.set(sample.fileName, sample)
+}
+
+function createFxExportSample(context: ExportContext, clip: FxClip, trackIndex: number) {
+  const sampleIndex = allocateCustomIndex(context, clip.bank, clip.sound)
+  const fileName = getSampleFileName(clip.bank, clip.sound, sampleIndex)
+  const sample: ExportSample = {
+    sampleName: fileName,
+    bank: clip.bank,
+    sound: clip.sound,
+    sampleIndex,
+    trackIndex: trackIndex + clip.id / 1_000_000,
+    fileName,
+    data: clip.data,
+  }
+
+  context.fxSamplesByClipId.set(clip.id, sample)
+  context.samplesByFileName.set(fileName, sample)
+
+  return sample
+}
+
+function createExportContext(): ExportContext {
+  const context: ExportContext = {
+    samplesByFileName: new Map(),
+    fxSamplesByClipId: new Map(),
+    occupiedCustomIndices: new Map(),
+    mixedSamplesByKey: new Map(),
+  }
+
+  if (notes.value.length) {
+    addExportSampleToContext(context, getFallbackExportSample())
+  }
+
+  tracks.value.forEach((track, trackIndex) => {
+    if (track.channelType === "regular") {
+      const hasAssignedNotes = track.regularNotes.some((regularNote) => regularNote.assignedNoteIndex !== null)
+      const sample = hasAssignedNotes ? getExportSampleForTrack(track, trackIndex) : null
+
+      if (sample) {
+        addExportSampleToContext(context, sample)
+      }
+
+      return
+    }
+
+    for (const clip of track.fxClips) {
+      if (clip.assignedNoteIndex !== null) {
+        createFxExportSample(context, clip, trackIndex)
+      }
+    }
+  })
+
+  return context
+}
+
+function canSampleAssignToNote(sample: ExportSample, note: OsuNote) {
+  return note.kind !== "slider-body" || sample.sound === "sliderwhistle"
+}
+
+function getSelectedHitsoundLayer(noteIndex: number, fallbackNormal: ExportSample, context: ExportContext) {
   const layer: HitsoundLayer = {
     hitSoundBits: 0,
   }
@@ -2344,6 +2513,26 @@ function getSelectedHitsoundLayer(noteIndex: number, fallbackNormal: ExportSampl
     }
   })
 
+  tracks.value.forEach((track) => {
+    if (track.channelType !== "fx") {
+      return
+    }
+
+    for (const clip of track.fxClips) {
+      if (clip.assignedNoteIndex !== noteIndex) {
+        continue
+      }
+
+      const assignedNote = notes.value[noteIndex]
+      const exportSample = context.fxSamplesByClipId.get(clip.id)
+
+      if (assignedNote && exportSample && canSampleAssignToNote(exportSample, assignedNote)) {
+        hasSelectedSample = true
+        mergeSampleIntoLayer(layer, exportSample)
+      }
+    }
+  })
+
   if (!layer.normal) {
     layer.normal = fallbackNormal
   }
@@ -2351,7 +2540,7 @@ function getSelectedHitsoundLayer(noteIndex: number, fallbackNormal: ExportSampl
   return hasSelectedSample ? layer : null
 }
 
-function buildSourceHitsoundAssignments() {
+async function buildSourceHitsoundAssignments(context: ExportContext) {
   const assignments = new Map<number, SourceHitsoundAssignment>()
   const fallbackSample = getFallbackExportSample()
   const sourceSlots = new Map<number, { hasHead: boolean, edgeIndices: Set<number> }>()
@@ -2369,23 +2558,24 @@ function buildSourceHitsoundAssignments() {
 
     sourceSlots.set(note.sourceIndex, slots)
 
-    const hitsoundLayer = getSelectedHitsoundLayer(note.index, fallbackSample)
+    const hitsoundLayer = getSelectedHitsoundLayer(note.index, fallbackSample, context)
 
     if (!hitsoundLayer) {
       continue
     }
 
+    const resolvedHitsoundLayer = await resolveHitsoundLayer(hitsoundLayer, context)
     const assignment = assignments.get(note.sourceIndex) ?? {}
 
     if (note.kind === "slider-end" || note.kind === "slider-repeat") {
       if (note.edgeIndex !== undefined) {
         assignment.sliderEdges = assignment.sliderEdges ?? new Map<number, HitsoundLayer>()
-        assignment.sliderEdges.set(note.edgeIndex, hitsoundLayer)
+        assignment.sliderEdges.set(note.edgeIndex, resolvedHitsoundLayer)
       }
     } else if (note.kind === "slider-body") {
-      assignment.sliderBody = hitsoundLayer
+      assignment.sliderBody = resolvedHitsoundLayer
     } else {
-      assignment.head = hitsoundLayer
+      assignment.head = resolvedHitsoundLayer
     }
 
     assignments.set(note.sourceIndex, assignment)
@@ -2415,6 +2605,16 @@ function buildSourceHitsoundAssignments() {
     assignments.set(sourceIndex, assignment)
   }
 
+  for (const assignment of assignments.values()) {
+    const sliderBodyWhistle =
+      assignment.sliderBody?.addition?.sound === "sliderwhistle" ? assignment.sliderBody : undefined
+
+    if (sliderBodyWhistle) {
+      assignment.head = await mergeResolvedLayers(assignment.head, sliderBodyWhistle, context)
+      assignment.sliderBody = undefined
+    }
+  }
+
   return assignments
 }
 
@@ -2428,6 +2628,259 @@ function getHitSoundBit(sound: SampleSound) {
   }
 
   return bits[sound]
+}
+
+function getAdditionPriority(sound: SampleSound) {
+  const priorities: Record<SampleSound, number> = {
+    hitnormal: 0,
+    hitwhistle: 2,
+    sliderwhistle: 2,
+    hitclap: 3,
+    hitfinish: 4,
+  }
+
+  return priorities[sound]
+}
+
+function chooseRepresentativeAddition(additions: ExportSample[]) {
+  return additions.reduce((best, sample) => {
+    const priorityDelta = getAdditionPriority(sample.sound) - getAdditionPriority(best.sound)
+
+    if (priorityDelta > 0) {
+      return sample
+    }
+
+    if (priorityDelta === 0 && sample.trackIndex > best.trackIndex) {
+      return sample
+    }
+
+    return best
+  })
+}
+
+function canRepresentAdditionsDirectly(additions: ExportSample[]) {
+  if (additions.length <= 1) {
+    return true
+  }
+
+  const [first] = additions
+
+  return additions.every(
+    (sample) => sample.bank === first.bank && sample.sampleIndex === first.sampleIndex,
+  )
+}
+
+async function getExportSampleAudioData(sample: ExportSample) {
+  if (sample.data) {
+    return sample.data.slice(0)
+  }
+
+  const defaultSample = defaultSamples.find((candidate) => candidate.name === sample.fileName)
+
+  if (!defaultSample) {
+    throw new Error(`Could not find audio data for ${sample.fileName}`)
+  }
+
+  const response = await fetch(defaultSample.url)
+
+  if (!response.ok) {
+    throw new Error(`Could not load ${sample.fileName}`)
+  }
+
+  return response.arrayBuffer()
+}
+
+function writeAscii(view: DataView, offset: number, value: string) {
+  for (let index = 0; index < value.length; index += 1) {
+    view.setUint8(offset + index, value.charCodeAt(index))
+  }
+}
+
+function audioBufferToWav(buffer: AudioBuffer) {
+  const channelCount = buffer.numberOfChannels
+  const bytesPerSample = 2
+  const blockAlign = channelCount * bytesPerSample
+  const dataByteLength = buffer.length * blockAlign
+  const arrayBuffer = new ArrayBuffer(44 + dataByteLength)
+  const view = new DataView(arrayBuffer)
+  let offset = 0
+
+  writeAscii(view, offset, "RIFF")
+  offset += 4
+  view.setUint32(offset, 36 + dataByteLength, true)
+  offset += 4
+  writeAscii(view, offset, "WAVE")
+  offset += 4
+  writeAscii(view, offset, "fmt ")
+  offset += 4
+  view.setUint32(offset, 16, true)
+  offset += 4
+  view.setUint16(offset, 1, true)
+  offset += 2
+  view.setUint16(offset, channelCount, true)
+  offset += 2
+  view.setUint32(offset, buffer.sampleRate, true)
+  offset += 4
+  view.setUint32(offset, buffer.sampleRate * blockAlign, true)
+  offset += 4
+  view.setUint16(offset, blockAlign, true)
+  offset += 2
+  view.setUint16(offset, bytesPerSample * 8, true)
+  offset += 2
+  writeAscii(view, offset, "data")
+  offset += 4
+  view.setUint32(offset, dataByteLength, true)
+  offset += 4
+
+  const channelData = Array.from({ length: channelCount }, (_, channelIndex) =>
+    buffer.getChannelData(channelIndex),
+  )
+
+  for (let sampleIndex = 0; sampleIndex < buffer.length; sampleIndex += 1) {
+    for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+      const sample = Math.max(-1, Math.min(1, channelData[channelIndex][sampleIndex] ?? 0))
+      const pcm = sample < 0 ? sample * 0x8000 : sample * 0x7fff
+
+      view.setInt16(offset, pcm, true)
+      offset += 2
+    }
+  }
+
+  return arrayBuffer
+}
+
+async function mixExportSamples(samples: ExportSample[]) {
+  const AudioContextClass =
+    window.AudioContext ?? (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+
+  if (!AudioContextClass) {
+    throw new Error("This browser cannot decode audio for FX sample export.")
+  }
+
+  const audioContext = new AudioContextClass()
+
+  try {
+    const decodedBuffers = await Promise.all(
+      samples.map(async (sample) => audioContext.decodeAudioData(await getExportSampleAudioData(sample))),
+    )
+    const sampleRate = Math.max(44_100, ...decodedBuffers.map((buffer) => buffer.sampleRate))
+    const channelCount = Math.max(1, ...decodedBuffers.map((buffer) => buffer.numberOfChannels))
+    const frameLength = Math.max(
+      1,
+      ...decodedBuffers.map((buffer) => Math.ceil(buffer.duration * sampleRate)),
+    )
+    const offlineContext = new OfflineAudioContext(channelCount, frameLength, sampleRate)
+
+    for (const buffer of decodedBuffers) {
+      const source = offlineContext.createBufferSource()
+
+      source.buffer = buffer
+      source.connect(offlineContext.destination)
+      source.start(0)
+    }
+
+    return audioBufferToWav(await offlineContext.startRendering())
+  } finally {
+    await audioContext.close()
+  }
+}
+
+function getMixedAdditionKey(additions: ExportSample[], representative: ExportSample) {
+  return [
+    representative.bank,
+    representative.sound,
+    ...additions
+      .map((sample) => `${sample.fileName}:${sample.trackIndex}`)
+      .sort(),
+  ].join("|")
+}
+
+async function createMixedAdditionSample(context: ExportContext, additions: ExportSample[]) {
+  const representative = chooseRepresentativeAddition(additions)
+  const key = getMixedAdditionKey(additions, representative)
+  const cachedSample = context.mixedSamplesByKey.get(key)
+
+  if (cachedSample) {
+    return cachedSample
+  }
+
+  const sampleIndex = allocateCustomIndex(context, representative.bank, representative.sound)
+  const fileName = getSampleFileName(representative.bank, representative.sound, sampleIndex)
+  const mixedSample: ExportSample = {
+    sampleName: fileName,
+    bank: representative.bank,
+    sound: representative.sound,
+    sampleIndex,
+    trackIndex: representative.trackIndex,
+    fileName,
+    data: await mixExportSamples(additions),
+  }
+
+  context.mixedSamplesByKey.set(key, mixedSample)
+  context.samplesByFileName.set(fileName, mixedSample)
+
+  return mixedSample
+}
+
+async function resolveHitsoundLayer(layer: HitsoundLayer, context: ExportContext) {
+  const additions = layer.additions ?? (layer.addition ? [layer.addition] : [])
+
+  if (!additions.length) {
+    return {
+      normal: layer.normal,
+      hitSoundBits: 0,
+    }
+  }
+
+  if (canRepresentAdditionsDirectly(additions)) {
+    return {
+      normal: layer.normal,
+      addition: chooseRepresentativeAddition(additions),
+      additions,
+      hitSoundBits: additions.reduce((bits, sample) => bits | getHitSoundBit(sample.sound), 0),
+    }
+  }
+
+  const mixedSample = await createMixedAdditionSample(context, additions)
+
+  return {
+    normal: layer.normal,
+    addition: mixedSample,
+    additions: [mixedSample],
+    hitSoundBits: getHitSoundBit(mixedSample.sound),
+  }
+}
+
+function getLayerAdditions(layer: HitsoundLayer | undefined) {
+  return layer?.additions ?? (layer?.addition ? [layer.addition] : [])
+}
+
+async function mergeResolvedLayers(
+  left: HitsoundLayer | undefined,
+  right: HitsoundLayer | undefined,
+  context: ExportContext,
+) {
+  if (!left) {
+    return right
+  }
+
+  if (!right) {
+    return left
+  }
+
+  const normal =
+    right.normal && (!left.normal || right.normal.trackIndex > left.normal.trackIndex)
+      ? right.normal
+      : left.normal
+
+  return resolveHitsoundLayer(
+    {
+      normal,
+      additions: [...getLayerAdditions(left), ...getLayerAdditions(right)],
+      hitSoundBits: left.hitSoundBits | right.hitSoundBits,
+    },
+    context,
+  )
 }
 
 function getSampleSetId(bank: SampleBank) {
@@ -2595,42 +3048,12 @@ function applySliderEdgeHitsound(
   parts[10] = applyLayerToHitSample(parts[10], layer)
 }
 
-function mergeHitsoundLayers(
-  left: HitsoundLayer | undefined,
-  right: HitsoundLayer | undefined,
-) {
-  if (!left) {
-    return right
-  }
-
-  if (!right) {
-    return left
-  }
-
-  return {
-    normal:
-      right.normal && (!left.normal || right.normal.trackIndex > left.normal.trackIndex)
-        ? right.normal
-        : left.normal,
-    addition:
-      right.addition && (!left.addition || right.addition.trackIndex > left.addition.trackIndex)
-        ? right.addition
-        : left.addition,
-    hitSoundBits: left.hitSoundBits | right.hitSoundBits,
-  }
-}
-
 function rewriteHitObjectLine(line: string, assignment: SourceHitsoundAssignment) {
   const parts = line.split(",")
   const kind = getObjectKind(Number(parts[3]))
 
   if (kind === "slider") {
-    const sliderBodyWhistle =
-      assignment.sliderBody?.addition?.sound === "sliderwhistle" ? assignment.sliderBody : undefined
-    const sliderHeadLayer = mergeHitsoundLayers(
-      assignment.head,
-      sliderBodyWhistle,
-    )
+    const sliderHeadLayer = assignment.head
 
     if (sliderHeadLayer) {
       applyHeadHitsound(parts, kind, sliderHeadLayer)
@@ -2647,13 +3070,13 @@ function rewriteHitObjectLine(line: string, assignment: SourceHitsoundAssignment
   return parts.join(",")
 }
 
-function buildHitsoundedOsuText() {
+async function buildHitsoundedOsuText(context: ExportContext) {
   if (!originalOsuText.value || !hitObjectLineIndices.value.length) {
     return ""
   }
 
   const lines = originalOsuText.value.split(/\r?\n/)
-  const assignments = buildSourceHitsoundAssignments()
+  const assignments = await buildSourceHitsoundAssignments(context)
 
   for (const [sourceIndex, assignment] of assignments.entries()) {
     const lineIndex = hitObjectLineIndices.value[sourceIndex]
@@ -2668,39 +3091,8 @@ function buildHitsoundedOsuText() {
   return lines.join("\n")
 }
 
-function getUsedExportSamples() {
-  const samplesByFileName = new Map<string, ExportSample>()
-
-  if (notes.value.length) {
-    const fallbackSample = getFallbackExportSample()
-
-    if (fallbackSample.data) {
-      samplesByFileName.set(fallbackSample.fileName, fallbackSample)
-    }
-  }
-
-  tracks.value.forEach((track, trackIndex) => {
-    if (
-      track.channelType !== "regular" ||
-      !track.regularNotes.some((regularNote) => regularNote.assignedNoteIndex !== null)
-    ) {
-      return
-    }
-
-    const sample = getExportSampleForTrack(track, trackIndex)
-
-    if (!sample) {
-      return
-    }
-
-    // TODO: Surface duplicate export filenames in the UI. For now, later
-    // tracks overwrite earlier tracks, matching the hitsound conflict rule.
-    if (sample.data) {
-      samplesByFileName.set(sample.fileName, sample)
-    }
-  })
-
-  return [...samplesByFileName.values()]
+function getUsedExportSamples(context: ExportContext) {
+  return [...context.samplesByFileName.values()]
 }
 
 async function addSampleToZip(zip: InstanceType<typeof import("jszip").default>, sample: ExportSample) {
@@ -2710,7 +3102,8 @@ async function addSampleToZip(zip: InstanceType<typeof import("jszip").default>,
 }
 
 async function downloadHitsoundedOsu() {
-  const hitsoundedOsuText = buildHitsoundedOsuText()
+  const exportContext = createExportContext()
+  const hitsoundedOsuText = await buildHitsoundedOsuText(exportContext)
 
   if (!hitsoundedOsuText) {
     return
@@ -2722,7 +3115,7 @@ async function downloadHitsoundedOsu() {
 
   zip.file(`${baseName} [hitsounded].osu`, hitsoundedOsuText)
 
-  for (const sample of getUsedExportSamples()) {
+  for (const sample of getUsedExportSamples(exportContext)) {
     await addSampleToZip(zip, sample)
   }
 
@@ -2787,7 +3180,7 @@ function getTrackLaneHeight(trackIndex: number) {
   }
 
   if (track.channelType === "fx") {
-    return fxTrackLaneHeight
+    return getSelectedFxClip(track) ? fxEditorTrackLaneHeight : fxTrackLaneHeight
   }
 
   if (!isHitsoundPickerOpen(track)) {
@@ -4094,6 +4487,29 @@ onBeforeUnmount(() => {
                   @change="handleFxClipUpload($event, trackIndex)"
                 />
                 <span>{{ track.fxClips.length }} clips</span>
+                <div v-if="getSelectedFxClip(track)" class="fx-clip-editor">
+                  <span class="fx-clip-editor-name">{{ getSelectedFxClip(track)?.name }}</span>
+                  <div class="lane-mini-controls">
+                    <select
+                      :value="getSelectedFxClip(track)?.bank"
+                      title="FX sample set"
+                      @change="updateSelectedFxClipBank(track, $event)"
+                    >
+                      <option v-for="bank in sampleBanks" :key="`fx-bank-${bank}`" :value="bank">
+                        {{ bank }}
+                      </option>
+                    </select>
+                    <select
+                      :value="getSelectedFxClip(track)?.sound"
+                      title="FX sample type"
+                      @change="updateSelectedFxClipSound(track, $event)"
+                    >
+                      <option v-for="sound in sampleSounds" :key="`fx-sound-${sound}`" :value="sound">
+                        {{ sound.replace(/^hit/, "") }}
+                      </option>
+                    </select>
+                  </div>
+                </div>
               </template>
             </div>
 
@@ -4102,15 +4518,19 @@ onBeforeUnmount(() => {
                 v-for="clip in track.fxClips"
                 :key="clip.id"
                 class="fx-clip"
-                :class="{ assigned: clip.assignedNoteIndex !== null }"
+                :class="{
+                  assigned: clip.assignedNoteIndex !== null,
+                  selected: selectedFxClipId === clip.id,
+                }"
                 :style="fxClipStyle(clip)"
                 type="button"
-                :title="`${clip.name}${clip.assignedNoteIndex !== null ? ` assigned to ${formatTime(notes[clip.assignedNoteIndex]?.timeMs ?? clip.startMs)}` : ''}`"
-                @click.stop="assignFxClipToNearestSlot(clip)"
+                :title="`${clip.name} -> ${clip.bank}-${clip.sound}${clip.assignedNoteIndex !== null ? ` assigned to ${formatTime(notes[clip.assignedNoteIndex]?.timeMs ?? clip.startMs)}` : ''}`"
+                @click.stop="selectFxClip(trackIndex, clip)"
                 @pointerdown.stop="startFxClipDrag($event, trackIndex, clip)"
                 @dblclick.stop="removeFxClip(trackIndex, clip.id)"
               >
-                {{ clip.name }}
+                <span>{{ clip.name }}</span>
+                <small>{{ clip.bank }}-{{ clip.sound.replace(/^hit/, "") }}</small>
               </button>
             </template>
 
@@ -4663,6 +5083,21 @@ button:disabled {
   font-size: 0.68rem;
 }
 
+.fx-clip-editor {
+  display: grid;
+  gap: 5px;
+  padding: 6px;
+  border: 1px solid var(--track-accent-muted, rgba(103, 232, 249, 0.36));
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.35);
+}
+
+.fx-clip-editor-name {
+  color: #e2e8f0;
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
 .hs-picker {
   display: grid;
   gap: 5px;
@@ -4790,6 +5225,9 @@ button:disabled {
   position: absolute;
   top: 50%;
   z-index: 3;
+  display: grid;
+  align-content: center;
+  gap: 2px;
   overflow: hidden;
   height: 46px;
   transform: translateY(-50%);
@@ -4807,13 +5245,28 @@ button:disabled {
   cursor: grab;
 }
 
+.fx-clip small {
+  overflow: hidden;
+  color: rgba(226, 232, 240, 0.78);
+  font-size: 0.62rem;
+  text-overflow: ellipsis;
+}
+
 .fx-clip.assigned {
   box-shadow:
     0 0 0 3px var(--track-accent-soft, rgba(103, 232, 249, 0.16)),
     0 12px 28px rgba(2, 6, 23, 0.35);
 }
 
+.fx-clip.selected {
+  border-color: #f8fafc;
+  box-shadow:
+    0 0 0 3px rgba(248, 250, 252, 0.22),
+    0 12px 28px rgba(2, 6, 23, 0.35);
+}
+
 .placed-note {
+  display: block;
   height: 22px;
   border-radius: 50%;
   padding: 0;
