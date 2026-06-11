@@ -396,13 +396,15 @@ function bakeSliderBodies(radius: number) {
 
     const pts = obj.polyline
     const [r, g, b] = obj.comboColor
+    // outer stroke half-width is radius+3, add 1px extra for anti-aliasing
+    const margin = Math.ceil(radius + 4)
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
 
     for (const p of pts) {
-      if (p.x - radius < minX) minX = p.x - radius
-      if (p.y - radius < minY) minY = p.y - radius
-      if (p.x + radius > maxX) maxX = p.x + radius
-      if (p.y + radius > maxY) maxY = p.y + radius
+      if (p.x - margin < minX) minX = p.x - margin
+      if (p.y - margin < minY) minY = p.y - margin
+      if (p.x + margin > maxX) maxX = p.x + margin
+      if (p.y + margin > maxY) maxY = p.y + margin
     }
 
     const w = Math.max(1, Math.ceil(maxX - minX))
@@ -492,7 +494,11 @@ function render(timeMs: number) {
   for (const { obj, timeUntilHit } of visible) {
     const approachProgress = Math.max(0, 1 - Math.max(0, timeUntilHit) / preemptMs)
     const fadeAlpha = Math.min(1, (preemptMs - Math.max(0, timeUntilHit)) / fadeInMs)
-    const hitAlpha = timeUntilHit < 0 ? Math.max(0, 1 + timeUntilHit / 200) : 1
+    // Sliders stay fully opaque until endTimeMs, then fade over 200ms
+    const timeAfterEnd = timeMs - obj.endTimeMs
+    const hitAlpha = obj.kind === "slider"
+      ? (timeAfterEnd > 0 ? Math.max(0, 1 - timeAfterEnd / 200) : 1)
+      : (timeUntilHit < 0 ? Math.max(0, 1 + timeUntilHit / 200) : 1)
     const alpha = Math.min(fadeAlpha, hitAlpha)
 
     const [r, g, b] = obj.comboColor
@@ -527,7 +533,7 @@ function render(timeMs: number) {
       // Slider head
       drawHitCircle(ctx, obj.x, obj.y, radius, r, g, b)
 
-      // Slider end cap
+      // Slider end cap (hollow circle at tail)
       if (obj.polyline && obj.polyline.length > 0) {
         const endPt = obj.polyline[obj.polyline.length - 1]!
         ctx.beginPath()
@@ -535,6 +541,36 @@ function render(timeMs: number) {
         ctx.strokeStyle = `rgba(${r},${g},${b},0.6)`
         ctx.lineWidth = 3
         ctx.stroke()
+      }
+
+      // Repeat arrows
+      if (obj.slides > 1 && obj.polyline && obj.polyline.length > 1) {
+        const drawArrow = (tip: Point, from: Point) => {
+          const dx = tip.x - from.x
+          const dy = tip.y - from.y
+          const len = Math.sqrt(dx * dx + dy * dy)
+          if (len < 0.1) return
+          const nx = dx / len
+          const ny = dy / len
+          const arrowSize = radius * 0.65
+          ctx!.beginPath()
+          ctx!.moveTo(tip.x + nx * arrowSize, tip.y + ny * arrowSize)
+          ctx!.lineTo(tip.x - ny * arrowSize * 0.55 - nx * arrowSize * 0.55, tip.y + nx * arrowSize * 0.55 - ny * arrowSize * 0.55)
+          ctx!.lineTo(tip.x + ny * arrowSize * 0.55 - nx * arrowSize * 0.55, tip.y - nx * arrowSize * 0.55 - ny * arrowSize * 0.55)
+          ctx!.closePath()
+          ctx!.fillStyle = "rgba(255,255,255,0.85)"
+          ctx!.fill()
+        }
+
+        const pts = obj.polyline
+        const tailPt = pts[pts.length - 1]!
+        const nearTail = pts[Math.max(0, pts.length - 2)]!
+        // Arrow at tail always (slider goes back from there)
+        drawArrow(tailPt, nearTail)
+        // Arrow at head for 3+ slides (it bounces back to start)
+        if (obj.slides >= 3) {
+          drawArrow(pts[0]!, pts[1]!)
+        }
       }
 
       // Slider ball during active slide
@@ -629,15 +665,22 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .renderer-wrap {
+  display: flex;
+  justify-content: center;
+  align-items: center;
   width: 100%;
   height: 100%;
+  overflow: hidden;
   background: #0f172a;
 }
 
 .renderer-canvas {
   display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
+  /* 672×544 = OSU_WIDTH+PAD*2 × OSU_HEIGHT+PAD*2 — preserves shape as drawer resizes */
+  aspect-ratio: 672 / 544;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
 }
 </style>
