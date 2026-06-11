@@ -11,6 +11,8 @@ type MapInfo = {
   audioFilename: string
   beatDivisor: number
   sliderMultiplier: number
+  approachRate: number
+  circleSize: number
 }
 
 type HitObjectKind = "circle" | "slider" | "spinner" | "hold"
@@ -951,6 +953,8 @@ function parseOsuFile(text: string) {
       audioFilename,
       beatDivisor: Number(editorSettings.get("BeatDivisor")) || 4,
       sliderMultiplier: Number(difficultySettings.get("SliderMultiplier")) || 1.4,
+      approachRate: Number(difficultySettings.get("ApproachRate") ?? difficultySettings.get("OverallDifficulty") ?? 5),
+      circleSize: Number(difficultySettings.get("CircleSize") ?? 4),
     },
     notes: parsedNotes,
     timingPoints: parsedTimingPoints,
@@ -4147,8 +4151,8 @@ onBeforeUnmount(() => {
 
 <template>
   <main class="app-shell">
-    <section class="panel upload-panel">
-      <div class="upload-summary">
+    <details class="panel upload-panel" open>
+      <summary class="upload-summary">
         <div>
           <p class="eyebrow">hitsound daw</p>
           <h1>{{ mapInfo ? mapTitle : "Place sounds on osu notes" }}</h1>
@@ -4161,66 +4165,68 @@ onBeforeUnmount(() => {
           Upload a beatmap and backing audio, then assign samples on the
           timeline.
         </p>
+      </summary>
+
+      <div class="upload-body">
+        <div class="compact-uploads">
+          <label class="compact-upload">
+            <span>.osu map</span>
+            <input accept=".osu,text/plain" type="file" @change="handleOsuUpload" />
+          </label>
+
+          <label class="compact-upload">
+            <span>Backing audio</span>
+            <input accept="audio/*" type="file" @change="handleBackingUpload" />
+          </label>
+
+          <label class="compact-upload">
+            <span>Fallback soft-hitnormal</span>
+            <input accept="audio/*" type="file" @change="handleFallbackSampleUpload" />
+          </label>
+
+          <label class="compact-upload">
+            <span>Load project</span>
+            <input accept=".json,application/json" type="file" @change="handleProjectLoad" />
+          </label>
+
+          <button
+            class="ghost-button export-button"
+            type="button"
+            :disabled="!originalOsuText"
+            @click="saveProject"
+          >
+            Save project
+          </button>
+
+          <button
+            class="ghost-button export-button"
+            type="button"
+            :disabled="!notes.length"
+            @click="downloadHitsoundedOsu"
+          >
+            Download hitsounded ZIP
+          </button>
+        </div>
+
+        <p v-if="mapInfo?.audioFilename" class="hint upload-hint">
+          Referenced audio: <code>{{ mapInfo.audioFilename }}</code>
+          <span v-if="backingAudioName"> Loaded: {{ backingAudioName }}</span>
+          <span v-if="fallbackCustomSample">
+            Fallback sample: {{ fallbackCustomSample.originalName }} as soft-hitnormal.wav
+          </span>
+        </p>
+
+        <audio
+          v-if="backingAudioUrl"
+          ref="backingAudio"
+          class="backing-player"
+          controls
+          :src="backingAudioUrl"
+          @ended="stopPlayback()"
+          @loadedmetadata="handleBackingMetadata"
+        />
       </div>
-
-      <div class="compact-uploads">
-        <label class="compact-upload">
-          <span>.osu map</span>
-          <input accept=".osu,text/plain" type="file" @change="handleOsuUpload" />
-        </label>
-
-        <label class="compact-upload">
-          <span>Backing audio</span>
-          <input accept="audio/*" type="file" @change="handleBackingUpload" />
-        </label>
-
-        <label class="compact-upload">
-          <span>Fallback soft-hitnormal</span>
-          <input accept="audio/*" type="file" @change="handleFallbackSampleUpload" />
-        </label>
-
-        <label class="compact-upload">
-          <span>Load project</span>
-          <input accept=".json,application/json" type="file" @change="handleProjectLoad" />
-        </label>
-
-        <button
-          class="ghost-button export-button"
-          type="button"
-          :disabled="!originalOsuText"
-          @click="saveProject"
-        >
-          Save project
-        </button>
-
-        <button
-          class="ghost-button export-button"
-          type="button"
-          :disabled="!notes.length"
-          @click="downloadHitsoundedOsu"
-        >
-          Download hitsounded ZIP
-        </button>
-      </div>
-
-      <p v-if="mapInfo?.audioFilename" class="hint upload-hint">
-        Referenced audio: <code>{{ mapInfo.audioFilename }}</code>
-        <span v-if="backingAudioName"> Loaded: {{ backingAudioName }}</span>
-        <span v-if="fallbackCustomSample">
-          Fallback sample: {{ fallbackCustomSample.originalName }} as soft-hitnormal.wav
-        </span>
-      </p>
-
-      <audio
-        v-if="backingAudioUrl"
-        ref="backingAudio"
-        class="backing-player"
-        controls
-        :src="backingAudioUrl"
-        @ended="stopPlayback()"
-        @loadedmetadata="handleBackingMetadata"
-      />
-    </section>
+    </details>
 
     <section v-if="notes.length" class="panel daw-panel">
       <div class="transport">
@@ -4286,6 +4292,19 @@ onBeforeUnmount(() => {
           />
         </label>
       </div>
+
+      <details v-if="notes.length" class="renderer-drawer" open>
+        <summary class="renderer-drawer-toggle">Playfield</summary>
+        <div class="renderer-drawer-body">
+          <BeatmapRenderer
+            :notes="notes"
+            :current-time-ms="currentTimeMs"
+            :approach-rate="mapInfo?.approachRate ?? 5"
+            :circle-size="mapInfo?.circleSize ?? 4"
+            :osu-text="originalOsuText"
+          />
+        </div>
+      </details>
 
       <div
         ref="timelineScroll"
@@ -4627,13 +4646,34 @@ onBeforeUnmount(() => {
 }
 
 .upload-panel {
-  align-items: flex-start;
-  flex-wrap: wrap;
   flex: 0 0 auto;
-  padding: 12px 14px;
+  padding: 0;
 }
 
 .upload-summary {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 24px;
+  padding: 12px 14px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.upload-summary::-webkit-details-marker {
+  display: none;
+}
+
+.upload-body {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 24px;
+  padding: 0 14px 12px;
+}
+
+.upload-summary > div {
   display: grid;
   gap: 4px;
   min-width: min(540px, 100%);
@@ -4646,6 +4686,7 @@ onBeforeUnmount(() => {
 }
 
 .upload-summary p,
+.upload-body p,
 .empty-panel p {
   max-width: 760px;
   margin: 0;
@@ -5302,12 +5343,58 @@ button:disabled {
   text-align: center;
 }
 
+.renderer-drawer {
+  flex: 0 0 auto;
+  margin-bottom: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.45);
+  overflow: hidden;
+}
+
+.renderer-drawer-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  color: #94a3b8;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.renderer-drawer-toggle::before {
+  content: "▶";
+  display: inline-block;
+  font-size: 0.6rem;
+  transition: transform 0.15s;
+}
+
+details[open] .renderer-drawer-toggle::before {
+  transform: rotate(90deg);
+}
+
+.renderer-drawer-body {
+  resize: vertical;
+  overflow: hidden;
+  min-height: 80px;
+  max-height: 60vh;
+  height: 220px;
+  display: flex;
+  align-items: stretch;
+}
+
 @media (max-width: 760px) {
   .app-shell {
     padding: 16px;
   }
 
-  .upload-panel,
+  .upload-summary,
+  .upload-body,
   .compact-uploads {
     align-items: stretch;
     flex-direction: column;
