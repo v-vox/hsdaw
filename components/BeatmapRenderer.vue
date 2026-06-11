@@ -42,6 +42,9 @@ const props = defineProps<{
 
 const OSU_WIDTH = 512
 const OSU_HEIGHT = 384
+const PAD = 80
+const CANVAS_WIDTH = OSU_WIDTH + PAD * 2
+const CANVAS_HEIGHT = OSU_HEIGHT + PAD * 2
 
 const COMBO_COLORS: Array<[number, number, number]> = [
   [255, 199, 0],
@@ -455,9 +458,12 @@ function render(timeMs: number) {
   const fadeInMs = preemptMs * 0.4
   const radius = getCircleRadius(props.circleSize)
 
-  ctx.clearRect(0, 0, OSU_WIDTH, OSU_HEIGHT)
+  ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT)
   ctx.fillStyle = "#0f172a"
-  ctx.fillRect(0, 0, OSU_WIDTH, OSU_HEIGHT)
+  ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT)
+
+  ctx.save()
+  ctx.translate(PAD, PAD)
 
   // Playfield border
   ctx.strokeStyle = "rgba(255,255,255,0.07)"
@@ -580,8 +586,9 @@ function render(timeMs: number) {
   }
 
   ctx.globalAlpha = 1
+  ctx.restore()
 
-  // Playhead time indicator
+  // Time label in padding area (unaffected by translate)
   ctx.fillStyle = "rgba(255,255,255,0.25)"
   ctx.font = "10px monospace"
   ctx.fillText(`${(timeMs / 1000).toFixed(2)}s`, 4, 12)
@@ -616,7 +623,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="renderer-wrap">
-    <canvas ref="canvasRef" :width="OSU_WIDTH" :height="OSU_HEIGHT" class="renderer-canvas" />
+    <canvas ref="canvasRef" :width="CANVAS_WIDTH" :height="CANVAS_HEIGHT" class="renderer-canvas" />
   </div>
 </template>
 
