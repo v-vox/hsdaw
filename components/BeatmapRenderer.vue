@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 
 type NoteKind = "circle" | "slider" | "slider-body" | "slider-repeat" | "slider-end" | "spinner" | "hold"
 
@@ -55,10 +55,46 @@ const COMBO_COLORS: Array<[number, number, number]> = [
   [196, 102, 255],
 ]
 
+const rendererWrapRef = ref<HTMLDivElement | null>(null)
 const canvasRef = ref<HTMLCanvasElement | null>(null)
+const canvasDisplayWidth = ref(CANVAS_WIDTH)
+const canvasDisplayHeight = ref(CANVAS_HEIGHT)
 let ctx: CanvasRenderingContext2D | null = null
 let rafId: number | null = null
+let resizeObserver: ResizeObserver | null = null
 let visualObjects: VisualObject[] = []
+
+const canvasStyle = computed(() => ({
+  width: `${canvasDisplayWidth.value}px`,
+  height: `${canvasDisplayHeight.value}px`,
+}))
+
+function updateCanvasDisplaySize() {
+  const wrap = rendererWrapRef.value
+
+  if (!wrap) {
+    return
+  }
+
+  const width = wrap.clientWidth
+  const height = wrap.clientHeight
+
+  if (width <= 0 || height <= 0) {
+    return
+  }
+
+  const canvasAspect = CANVAS_WIDTH / CANVAS_HEIGHT
+  const wrapAspect = width / height
+
+  if (wrapAspect > canvasAspect) {
+    canvasDisplayHeight.value = height
+    canvasDisplayWidth.value = height * canvasAspect
+    return
+  }
+
+  canvasDisplayWidth.value = width
+  canvasDisplayHeight.value = width / canvasAspect
+}
 
 // ─── Osu difficulty helpers ──────────────────────────────────────────────────
 
@@ -649,17 +685,31 @@ watch(() => props.osuText, rebuild, { immediate: true })
 
 onMounted(() => {
   ctx = canvasRef.value?.getContext("2d") ?? null
+  updateCanvasDisplaySize()
+  resizeObserver = new ResizeObserver(updateCanvasDisplaySize)
+
+  if (rendererWrapRef.value) {
+    resizeObserver.observe(rendererWrapRef.value)
+  }
+
   rafId = requestAnimationFrame(loop)
 })
 
 onBeforeUnmount(() => {
   if (rafId !== null) cancelAnimationFrame(rafId)
+  resizeObserver?.disconnect()
 })
 </script>
 
 <template>
-  <div class="renderer-wrap">
-    <canvas ref="canvasRef" :width="CANVAS_WIDTH" :height="CANVAS_HEIGHT" class="renderer-canvas" />
+  <div ref="rendererWrapRef" class="renderer-wrap">
+    <canvas
+      ref="canvasRef"
+      :width="CANVAS_WIDTH"
+      :height="CANVAS_HEIGHT"
+      class="renderer-canvas"
+      :style="canvasStyle"
+    />
   </div>
 </template>
 
@@ -677,12 +727,9 @@ onBeforeUnmount(() => {
 }
 
 .renderer-canvas {
+  flex: 0 0 auto;
   display: block;
-  /* 672×544 = OSU_WIDTH+PAD*2 × OSU_HEIGHT+PAD*2 — preserves shape as drawer resizes */
-  aspect-ratio: 672 / 544;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  object-position: center;
+  max-width: 100%;
+  max-height: 100%;
 }
 </style>
