@@ -668,6 +668,8 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: center;
   align-items: center;
+  min-width: 0;
+  min-height: 0;
   width: 100%;
   height: 100%;
   overflow: hidden;
@@ -678,9 +680,9 @@ onBeforeUnmount(() => {
   display: block;
   /* 672×544 = OSU_WIDTH+PAD*2 × OSU_HEIGHT+PAD*2 — preserves shape as drawer resizes */
   aspect-ratio: 672 / 544;
-  max-width: 100%;
-  max-height: 100%;
-  width: auto;
-  height: auto;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
 }
 </style>

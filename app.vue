@@ -5381,6 +5381,7 @@ details[open] .renderer-drawer-toggle::before {
 .renderer-drawer-body {
   resize: vertical;
   overflow: hidden;
+  min-width: 0;
   min-height: 80px;
   max-height: 60vh;
   height: 220px;
