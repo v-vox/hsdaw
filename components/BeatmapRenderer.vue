@@ -59,6 +59,8 @@ const rendererWrapRef = ref<HTMLDivElement | null>(null)
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const canvasDisplayWidth = ref(CANVAS_WIDTH)
 const canvasDisplayHeight = ref(CANVAS_HEIGHT)
+const canvasDisplayLeft = ref(0)
+const canvasDisplayTop = ref(0)
 let ctx: CanvasRenderingContext2D | null = null
 let rafId: number | null = null
 let resizeObserver: ResizeObserver | null = null
@@ -67,6 +69,8 @@ let lastMeasuredHeight = 0
 let visualObjects: VisualObject[] = []
 
 const canvasStyle = computed(() => ({
+  left: `${canvasDisplayLeft.value}px`,
+  top: `${canvasDisplayTop.value}px`,
   width: `${canvasDisplayWidth.value}px`,
   height: `${canvasDisplayHeight.value}px`,
 }))
@@ -99,11 +103,15 @@ function updateCanvasDisplaySize() {
   if (wrapAspect > canvasAspect) {
     canvasDisplayHeight.value = height
     canvasDisplayWidth.value = height * canvasAspect
+    canvasDisplayLeft.value = (width - canvasDisplayWidth.value) / 2
+    canvasDisplayTop.value = 0
     return
   }
 
   canvasDisplayWidth.value = width
   canvasDisplayHeight.value = width / canvasAspect
+  canvasDisplayLeft.value = 0
+  canvasDisplayTop.value = (height - canvasDisplayHeight.value) / 2
 }
 
 // ─── Osu difficulty helpers ──────────────────────────────────────────────────
@@ -732,8 +740,6 @@ onBeforeUnmount(() => {
 .renderer-wrap {
   position: absolute;
   inset: 0;
-  display: grid;
-  place-items: center;
   min-width: 0;
   min-height: 0;
   width: 100%;
@@ -743,6 +749,7 @@ onBeforeUnmount(() => {
 }
 
 .renderer-canvas {
+  position: absolute;
   flex: 0 0 auto;
   display: block;
   max-width: 100%;
