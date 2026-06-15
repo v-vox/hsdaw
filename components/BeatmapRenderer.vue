@@ -715,9 +715,10 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .renderer-wrap {
-  display: flex;
-  justify-content: center;
-  align-items: center;
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
   min-width: 0;
   min-height: 0;
   width: 100%;

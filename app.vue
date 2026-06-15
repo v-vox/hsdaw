@@ -5379,6 +5379,7 @@ details[open] .renderer-drawer-toggle::before {
 }
 
 .renderer-drawer-body {
+  position: relative;
   resize: vertical;
   overflow: hidden;
   min-width: 0;
