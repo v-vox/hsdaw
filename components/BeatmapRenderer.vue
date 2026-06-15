@@ -69,10 +69,24 @@ let lastMeasuredHeight = 0
 let visualObjects: VisualObject[] = []
 
 const canvasStyle = computed(() => ({
+  position: "absolute",
   left: `${canvasDisplayLeft.value}px`,
   top: `${canvasDisplayTop.value}px`,
   width: `${canvasDisplayWidth.value}px`,
   height: `${canvasDisplayHeight.value}px`,
+  display: "block",
+  maxWidth: "100%",
+  maxHeight: "100%",
+}))
+
+const wrapStyle = computed(() => ({
+  position: "absolute",
+  inset: "0",
+  minWidth: "0",
+  minHeight: "0",
+  width: "100%",
+  height: "100%",
+  overflow: "hidden",
 }))
 
 function updateCanvasDisplaySize() {
@@ -725,7 +739,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="rendererWrapRef" class="renderer-wrap">
+  <div ref="rendererWrapRef" class="renderer-wrap" :style="wrapStyle">
     <canvas
       ref="canvasRef"
       :width="CANVAS_WIDTH"
@@ -738,21 +752,10 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .renderer-wrap {
-  position: absolute;
-  inset: 0;
-  min-width: 0;
-  min-height: 0;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
   background: #0f172a;
 }
 
 .renderer-canvas {
-  position: absolute;
   flex: 0 0 auto;
-  display: block;
-  max-width: 100%;
-  max-height: 100%;
 }
 </style>
