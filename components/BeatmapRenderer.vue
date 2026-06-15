@@ -62,6 +62,8 @@ const canvasDisplayHeight = ref(CANVAS_HEIGHT)
 let ctx: CanvasRenderingContext2D | null = null
 let rafId: number | null = null
 let resizeObserver: ResizeObserver | null = null
+let lastMeasuredWidth = 0
+let lastMeasuredHeight = 0
 let visualObjects: VisualObject[] = []
 
 const canvasStyle = computed(() => ({
@@ -71,17 +73,25 @@ const canvasStyle = computed(() => ({
 
 function updateCanvasDisplaySize() {
   const wrap = rendererWrapRef.value
+  const measuredElement = wrap?.parentElement ?? wrap
 
-  if (!wrap) {
+  if (!measuredElement) {
     return
   }
 
-  const width = wrap.clientWidth
-  const height = wrap.clientHeight
+  const width = measuredElement.clientWidth
+  const height = measuredElement.clientHeight
 
   if (width <= 0 || height <= 0) {
     return
   }
+
+  if (width === lastMeasuredWidth && height === lastMeasuredHeight) {
+    return
+  }
+
+  lastMeasuredWidth = width
+  lastMeasuredHeight = height
 
   const canvasAspect = CANVAS_WIDTH / CANVAS_HEIGHT
   const wrapAspect = width / height
@@ -667,6 +677,7 @@ function render(timeMs: number) {
 }
 
 function loop() {
+  updateCanvasDisplaySize()
   render(props.currentTimeMs)
   rafId = requestAnimationFrame(loop)
 }
@@ -690,6 +701,10 @@ onMounted(() => {
 
   if (rendererWrapRef.value) {
     resizeObserver.observe(rendererWrapRef.value)
+
+    if (rendererWrapRef.value.parentElement) {
+      resizeObserver.observe(rendererWrapRef.value.parentElement)
+    }
   }
 
   rafId = requestAnimationFrame(loop)
