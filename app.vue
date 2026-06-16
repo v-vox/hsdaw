@@ -314,6 +314,8 @@ const isPlaying = ref(false)
 const audioOffsetMs = ref(0)
 const snapPlaybackToGrid = ref(true)
 const followPlayhead = ref(true)
+const topBarHidden = ref(false)
+const quickPlaceMode = ref(false)
 const backingAudioUrl = ref<string | null>(null)
 const backingAudioName = ref("")
 const backingAudioDataUrl = ref<string | null>(null)
@@ -1599,7 +1601,9 @@ async function handleProjectLoad(event: Event) {
   await nextTick()
   timelineScroll.value?.scrollTo({ left: 0, top: 0 })
   updateTimelineViewport()
-  centerPlayheadInTimeline()
+  if (followPlayhead.value) {
+    centerPlayheadInTimeline()
+  }
 }
 
 function selectDefaultSample(trackIndex: number, sampleUrl: string) {
@@ -2041,7 +2045,11 @@ function addRegularNoteAtEvent(event: MouseEvent, trackIndex: number) {
   const target = event.target as HTMLElement | null
   const track = tracks.value[trackIndex]
 
-  if (!track || track.channelType !== "regular" || track.collapsed) {
+  if (!track || track.channelType !== "regular") {
+    return
+  }
+
+  if (quickPlaceMode.value) {
     return
   }
 
@@ -2049,24 +2057,37 @@ function addRegularNoteAtEvent(event: MouseEvent, trackIndex: number) {
     return
   }
 
-  const snappedTime = snapRegularTime(getTimelineTimeFromClientX(event.clientX), track)
-
-  captureUndoSnapshot()
-  setActiveTrack(trackIndex)
-  track.regularNotes.push(createRegularNote(snappedTime.timeMs, snappedTime.assignedNoteIndex))
-  syncRegularTrackHits(track)
+  addRegularNoteAtClientX(trackIndex, event.clientX, quickPlaceMode.value)
   suppressNextTimelineClick.value = true
   event.preventDefault()
 }
 
-function removeRegularNote(trackIndex: number, regularNoteId: number) {
+function addRegularNoteAtClientX(trackIndex: number, clientX: number, forceSnap = false) {
   const track = tracks.value[trackIndex]
 
   if (!track || track.channelType !== "regular") {
     return
   }
 
+  const snappedTime = snapRegularTime(getTimelineTimeFromClientX(clientX), track, forceSnap)
+
   captureUndoSnapshot()
+  setActiveTrack(trackIndex)
+  track.regularNotes.push(createRegularNote(snappedTime.timeMs, snappedTime.assignedNoteIndex))
+  syncRegularTrackHits(track)
+}
+
+function removeRegularNote(trackIndex: number, regularNoteId: number, captureSnapshot = true) {
+  const track = tracks.value[trackIndex]
+
+  if (!track || track.channelType !== "regular") {
+    return
+  }
+
+  if (captureSnapshot) {
+    captureUndoSnapshot()
+  }
+
   track.regularNotes = track.regularNotes.filter((note) => note.id !== regularNoteId)
   syncRegularTrackHits(track)
   selectedRegularNoteIds.value.delete(`${track.id}:${regularNoteId}`)
@@ -2111,6 +2132,10 @@ function snapAllSounds() {
 
 function startRegularNoteDrag(event: PointerEvent, trackIndex: number, note: RegularNote) {
   if (event.button !== 0) {
+    return
+  }
+
+  if (quickPlaceMode.value) {
     return
   }
 
@@ -2187,6 +2212,17 @@ function updateRegularNoteDrag(event: PointerEvent) {
 
 function finishRegularNoteDrag() {
   regularNoteDrag = null
+}
+
+function handleRegularNoteClick(event: MouseEvent, trackIndex: number, note: RegularNote) {
+  if (!quickPlaceMode.value) {
+    return
+  }
+
+  captureUndoSnapshot()
+  removeRegularNote(trackIndex, note.id, false)
+  suppressNextTimelineClick.value = true
+  event.preventDefault()
 }
 
 function removeFxClip(trackIndex: number, clipId: number) {
@@ -3226,6 +3262,33 @@ function getTrackIndexFromClientY(clientY: number) {
   return Math.max(0, tracks.value.length - 1)
 }
 
+function getTrackIndexAtClientY(clientY: number) {
+  const scroller = timelineScroll.value
+
+  if (!scroller) {
+    return null
+  }
+
+  const rect = scroller.getBoundingClientRect()
+  const yInContent = clientY - rect.top + scroller.scrollTop - timelineHeaderHeight
+
+  if (yInContent < 0) {
+    return null
+  }
+
+  let accumulatedTop = 0
+
+  for (const [trackIndex] of tracks.value.entries()) {
+    accumulatedTop += getTrackLaneHeight(trackIndex)
+
+    if (yInContent < accumulatedTop) {
+      return trackIndex
+    }
+  }
+
+  return null
+}
+
 function getSelectedRegularNoteRefs() {
   const selectedIds = selectedRegularNoteIds.value
   const refs: Array<{ track: Track, trackIndex: number, note: RegularNote }> = []
@@ -3270,6 +3333,10 @@ function startRangeSelection(event: PointerEvent, trackIndex: number) {
   const track = tracks.value[trackIndex]
 
   if (event.button !== 0) {
+    return
+  }
+
+  if (quickPlaceMode.value) {
     return
   }
 
@@ -4040,8 +4107,19 @@ function handleTimelineSeek(event: MouseEvent) {
 
   const target = event.target as HTMLElement | null
 
-  if (target?.closest("button, input, label, audio")) {
+  if (target?.closest("button, input, select, label, audio")) {
     return
+  }
+
+  if (quickPlaceMode.value) {
+    const trackIndex = getTrackIndexAtClientY(event.clientY)
+    const track = trackIndex !== null ? tracks.value[trackIndex] : null
+
+    if (trackIndex !== null && track?.channelType === "regular") {
+      addRegularNoteAtClientX(trackIndex, event.clientX, true)
+      event.preventDefault()
+      return
+    }
   }
 
   void seekToTime(getTimelineTimeFromClientX(event.clientX))
@@ -4151,7 +4229,7 @@ onBeforeUnmount(() => {
 
 <template>
   <main class="app-shell">
-    <details class="panel upload-panel" open>
+    <details v-if="!topBarHidden || !notes.length" class="panel upload-panel" open>
       <summary class="upload-summary">
         <div>
           <p class="eyebrow">hitsound daw</p>
@@ -4235,6 +4313,9 @@ onBeforeUnmount(() => {
         </button>
 
         <div class="channel-add-controls">
+          <button class="ghost-button" type="button" @click="topBarHidden = !topBarHidden">
+            {{ topBarHidden ? "Show top bar" : "Hide top bar" }}
+          </button>
           <button class="ghost-button" type="button" @click="addRegularChannel">Add HS</button>
           <button class="ghost-button" type="button" @click="addFxChannel">Add FX</button>
           <button class="ghost-button" type="button" @click="snapAllSounds">Snap all</button>
@@ -4273,6 +4354,11 @@ onBeforeUnmount(() => {
         <label class="compact-control checkbox-control">
           <span>Follow playhead</span>
           <input v-model="followPlayhead" type="checkbox" />
+        </label>
+
+        <label class="compact-control checkbox-control">
+          <span>Quick place</span>
+          <input v-model="quickPlaceMode" type="checkbox" />
         </label>
 
         <div class="clipboard-controls">
@@ -4567,6 +4653,7 @@ onBeforeUnmount(() => {
                 type="button"
                 :aria-label="`${track.name} note at ${formatTime(note.startMs)}`"
                 :title="`${track.name} at ${formatTime(note.startMs)}${note.assignedNoteIndex !== null ? `, assigned to ${formatSlotKind(notes[note.assignedNoteIndex]?.kind ?? 'circle')}` : ', not assigned to osu slot'}`"
+                @click.stop="handleRegularNoteClick($event, trackIndex, note)"
                 @pointerdown.stop="startRegularNoteDrag($event, trackIndex, note)"
                 @dblclick.stop="removeRegularNote(trackIndex, note.id)"
               />
@@ -4806,13 +4893,23 @@ button:disabled {
 }
 
 .transport {
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   flex: 0 0 auto;
+  overflow-x: auto;
+  overflow-y: hidden;
   margin-bottom: 12px;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+  white-space: nowrap;
+}
+
+.transport::-webkit-scrollbar {
+  display: none;
 }
 
 .channel-add-controls {
   display: flex;
+  flex: 0 0 auto;
   gap: 8px;
 }
 
@@ -4827,30 +4924,45 @@ button:disabled {
 
 .stat,
 .compact-control {
-  display: grid;
-  gap: 4px;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
 }
 
 .stat strong {
   color: #f8fafc;
-  font-size: 1.15rem;
+  font-size: 0.92rem;
 }
 
 .compact-control {
-  min-width: 150px;
+  min-width: 0;
+}
+
+.compact-control input[type="number"] {
+  width: 74px;
+}
+
+.compact-control input[type="range"] {
+  width: 120px;
 }
 
 .clipboard-controls {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
   gap: 8px;
   max-width: 520px;
 }
 
 .clipboard-controls span {
+  overflow: hidden;
+  max-width: 220px;
   color: #94a3b8;
   font-size: 0.8rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .checkbox-control input {
