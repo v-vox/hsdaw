@@ -4247,23 +4247,23 @@ onBeforeUnmount(() => {
 
       <div class="upload-body">
         <div class="compact-uploads">
-          <label class="compact-upload">
-            <span>.osu map</span>
+          <label class="compact-upload" title=".osu map">
+            <span>.osu</span>
             <input accept=".osu,text/plain" type="file" @change="handleOsuUpload" />
           </label>
 
-          <label class="compact-upload">
-            <span>Backing audio</span>
+          <label class="compact-upload" title="Backing audio">
+            <span>Audio</span>
             <input accept="audio/*" type="file" @change="handleBackingUpload" />
           </label>
 
-          <label class="compact-upload">
-            <span>Fallback soft-hitnormal</span>
+          <label class="compact-upload" title="Fallback soft-hitnormal">
+            <span>Fallback</span>
             <input accept="audio/*" type="file" @change="handleFallbackSampleUpload" />
           </label>
 
-          <label class="compact-upload">
-            <span>Load project</span>
+          <label class="compact-upload" title="Load project">
+            <span>Load</span>
             <input accept=".json,application/json" type="file" @change="handleProjectLoad" />
           </label>
 
@@ -4271,18 +4271,20 @@ onBeforeUnmount(() => {
             class="ghost-button export-button"
             type="button"
             :disabled="!originalOsuText"
+            title="Save project"
             @click="saveProject"
           >
-            Save project
+            Save
           </button>
 
           <button
             class="ghost-button export-button"
             type="button"
             :disabled="!notes.length"
+            title="Download hitsounded ZIP"
             @click="downloadHitsoundedOsu"
           >
-            Download hitsounded ZIP
+            Export ZIP
           </button>
         </div>
 
@@ -4737,6 +4739,13 @@ onBeforeUnmount(() => {
   padding: 0;
 }
 
+.upload-panel .upload-summary {
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 10px;
+  padding: 8px 10px;
+}
+
 .upload-summary {
   display: flex;
   align-items: flex-start;
@@ -4752,6 +4761,11 @@ onBeforeUnmount(() => {
   display: none;
 }
 
+.upload-panel .upload-body {
+  gap: 8px;
+  padding: 0 10px 8px;
+}
+
 .upload-body {
   display: flex;
   align-items: flex-start;
@@ -4760,10 +4774,37 @@ onBeforeUnmount(() => {
   padding: 0 14px 12px;
 }
 
+.upload-panel .upload-summary > div {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
 .upload-summary > div {
   display: grid;
   gap: 4px;
   min-width: min(540px, 100%);
+}
+
+.upload-panel .upload-summary h1 {
+  overflow: hidden;
+  max-width: 220px;
+  font-size: 0.95rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-panel .upload-summary p {
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-panel .eyebrow {
+  margin-bottom: 2px;
+  font-size: 0.62rem;
 }
 
 .upload-summary h1 {
@@ -4810,11 +4851,30 @@ button:disabled {
   opacity: 0.55;
 }
 
+.upload-panel .compact-uploads {
+  flex-wrap: nowrap;
+  gap: 6px;
+  width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.upload-panel .compact-uploads::-webkit-scrollbar {
+  display: none;
+}
+
 .compact-uploads {
   display: flex;
   align-items: end;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.upload-panel .compact-upload {
+  min-width: 92px;
+  padding: 4px 7px;
+  gap: 3px;
+  border-radius: 9px;
 }
 
 .compact-upload {
@@ -4836,6 +4896,24 @@ button:disabled {
   font-size: 0.8rem;
 }
 
+.upload-panel .compact-upload span {
+  font-size: 0.66rem;
+  white-space: nowrap;
+}
+
+.upload-panel .compact-upload input {
+  width: 100%;
+  max-width: 100%;
+  font-size: 0.62rem;
+}
+
+.upload-panel .export-button {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
 .compact-upload input {
   max-width: 170px;
   font-size: 0.78rem;
@@ -4843,6 +4921,16 @@ button:disabled {
 
 .hint {
   color: #cbd5e1;
+}
+
+.upload-panel .upload-hint {
+  margin: 0;
+  font-size: 0.72rem;
+}
+
+.upload-panel .backing-player {
+  width: min(260px, 100%);
+  height: 28px;
 }
 
 .upload-hint {
